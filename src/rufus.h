@@ -170,8 +170,17 @@
 // Bit masks used for the display of additional image options in the UI
 #define IMOP_WINTOGO                0x01
 #define IMOP_PERSISTENCE            0x02
+#define IMOP_ISO_OUTPUT             0x04
 
 #define ComboBox_GetCurItemData(hCtrl) ComboBox_GetItemData(hCtrl, ComboBox_GetCurSel(hCtrl))
+
+// IMOP_ISO_OUTPUT is set as soon as the image *can* be recreated (i.e. as soon as the 'Create a
+// new ISO image' entry is listed), not when the user selects it, since that entry is listed
+// alongside the regular Windows installation ones. The dropdown selection must therefore be
+// checked as well before treating an operation as device-less, exactly like Windows To Go does
+// with the IMOP_WINTOGO/IMOP_WIN_TO_GO pair. Use this instead of IMOP_ISO_OUTPUT directly.
+#define IS_ISO_OUTPUT()             (((image_options & IMOP_ISO_OUTPUT) != 0) && \
+									(ComboBox_GetCurItemData(hImageOption) == IMOP_ISO_CREATE))
 
 #define safe_free(p) do { free((void*)p); p = NULL; } while(0)
 #define safe_mm_free(p) do { _mm_free((void*)p); p = NULL; } while(0)
@@ -341,6 +350,7 @@ enum image_option_type {
 	IMOP_WIN_STANDARD = 0,
 	IMOP_WIN_EXTENDED,
 	IMOP_WIN_TO_GO,
+	IMOP_ISO_CREATE,
 	IMOP_MAX
 };
 
@@ -390,6 +400,9 @@ enum EFI_BOOT_TYPE {
 #define IS_EFI_BOOTABLE(r)  (r.has_efi != 0)
 #define IS_BIOS_BOOTABLE(r) (HAS_BOOTMGR(r) || HAS_SYSLINUX(r) || HAS_WINPE(r) || HAS_GRUB(r) || HAS_REACTOS(r) || HAS_KOLIBRIOS(r))
 #define HAS_WINTOGO(r)      (HAS_BOOTMGR(r) && IS_EFI_BOOTABLE(r) && HAS_WININST(r))
+// Only Windows installation images can be recreated, as the Windows customization is the only
+// modification that can be carried over to an ISO, and DD-only images cannot be repackaged.
+#define HAS_ISO_OUTPUT(r)   ((r).is_iso && HAS_WINDOWS(r) && !IS_DD_ONLY(r))
 #define HAS_PERSISTENCE(r)  ((HAS_SYSLINUX(r) || HAS_GRUB(r)) && !(HAS_WINDOWS(r) || HAS_REACTOS(r) || HAS_KOLIBRIOS(r)))
 #define IS_FAT(fs)          ((fs == FS_FAT16) || (fs == FS_FAT32))
 #define IS_EXT(fs)          ((fs >= FS_EXT2) && (fs <= FS_EXT4))

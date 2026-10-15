@@ -12,6 +12,13 @@ o v?.??
   - *NEW*      MSG_373 "I WILL ensure that I don't leave this media plugged on a PC I do not plan to erase."
   - *NEW*      MSG_374 "I AGREE that any data loss resulting from the use of this option lies entirely with me."
 
+o v?.??
+  // From the "Image option" dropdown, for Windows installation ISOs, when the user wants the
+  // modified image to be saved as a new ISO file instead of being written to a USB drive.
+  - *NEW*      MSG_375 "Create a new ISO image"
+  // Tooltip for the above dropdown entry.
+  - *NEW*      MSG_376 "Save the modified image as a new ISO file, leaving the original untouched"
+
 o v4.14 (2026.04.30)
   // NB: I used Google translate to update the following message, so please check for accuracy!
   - *UPDATED*  MSG_337 "An additional file ('diskcopy.dll') must be downloaded from Microsoft to install MS-DOS:" -> "An additional file ('%s') must be downloaded from Microsoft to use this feature:"

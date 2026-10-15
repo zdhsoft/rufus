@@ -1954,7 +1954,7 @@ try_clear:
 					goto out;
 				}
 				if (unattend_xml_path != NULL) {
-					if (!ApplyWindowsCustomization(drive_name[0], unattend_xml_flags | UNATTEND_WINDOWS_TO_GO))
+					if (!ApplyWindowsCustomization(drive_name, unattend_xml_flags | UNATTEND_WINDOWS_TO_GO))
 						ErrorStatus = RUFUS_ERROR(APPERR(ERROR_CANT_PATCH));
 				}
 			} else {
@@ -1997,7 +1997,7 @@ try_clear:
 						ErrorStatus = RUFUS_ERROR(APPERR(ERROR_CANT_PATCH));
 				}
 				if (unattend_xml_path != NULL) {
-					if (!ApplyWindowsCustomization(drive_name[0], unattend_xml_flags))
+					if (!ApplyWindowsCustomization(drive_name, unattend_xml_flags))
 						ErrorStatus = RUFUS_ERROR(APPERR(ERROR_CANT_PATCH));
 				}
 			}

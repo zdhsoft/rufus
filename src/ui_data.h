@@ -75,8 +75,8 @@ static int image_option_move_ids[] = {
 };
 
 static int image_option_toggle_ids[][2] = {
-	{ IDS_IMAGE_OPTION_TXT, 0x03 },
-	{ IDC_IMAGE_OPTION, 0x01 },
+	{ IDS_IMAGE_OPTION_TXT, 0x07 },
+	{ IDC_IMAGE_OPTION, 0x05 },
 	{ IDC_PERSISTENCE_SLIDER, 0x02 },
 	{ IDC_PERSISTENCE_SIZE, 0x02 },
 	{ IDC_PERSISTENCE_UNITS, 0x02 }

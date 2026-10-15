@@ -45,6 +45,7 @@
 #include "rufus.h"
 #include "ui.h"
 #include "vhd.h"
+#include "wue.h"
 #include "drive.h"
 #include "libfat.h"
 #include "missing.h"
@@ -82,16 +83,47 @@ typedef struct {
 	BOOLEAN is_old_c32[NB_OLD_C32];
 } EXTRACT_PROPS;
 
+/*
+ * Description of an El Torito boot entry, as we need it to produce a
+ * bootable image. Note that 'path' is the ISO-9660 path of the boot file
+ * (e.g. '/boot/syslinux/isolinux.bin') and is only valid if it could be
+ * resolved from the boot image LBA.
+ */
+#define MAX_ISO_BOOT_ENTRIES 8
+// The El Torito 'boot info table' starts 8 bytes into the boot file and is 56 bytes long
+// (4 DWORDs of data followed by 10 reserved DWORDs)
+#define BOOT_INFO_TABLE_OFFSET 8
+// Sanity limit for the size of a bootloader image we are willing to load for checksumming
+#define MAX_ISO_BOOT_IMAGE_SIZE (8 * MB)
+typedef struct {
+	uint8_t platform_id;			// 0x00 = BIOS, 0xEF = UEFI
+	BOOLEAN no_emulation;
+	uint32_t lsn;					// LBA of the boot image on the ISO
+	uint16_t num_sectors;			// Virtual sectors allocated to the boot image
+	char path[MAX_PATH];			// ISO path of the boot file (with a leading '/')
+} ISO_BOOT_ENTRY;
+
+typedef struct {
+	uint32_t count;
+	ISO_BOOT_ENTRY entry[MAX_ISO_BOOT_ENTRIES];
+} ISO_BOOT_ENTRIES;
+
 RUFUS_IMG_REPORT img_report;
 FILE* fd_md5sum = NULL;
 int64_t iso_blocking_status = -1;
 uint64_t total_blocks, extra_blocks, nb_blocks, last_nb_blocks;
 
 extern uint64_t md5sum_totalbytes;
-extern BOOL preserve_timestamps, enable_ntfs_compression, validate_md5sum;
+extern BOOL preserve_timestamps, enable_ntfs_compression, validate_md5sum, append_silent;
 extern HANDLE format_thread;
 extern StrArray modified_files;
 BOOL enable_iso = TRUE, enable_joliet = TRUE, enable_rockridge = TRUE, has_ldlinux_c32;
+// When set, we are extracting/patching files to recreate an ISO image rather than a USB
+// drive. Some of the patches we apply for USB (label substitution, persistence and the
+// Red Hat 'inst.repo' workaround) are specific to a writable file system and would either
+// be pointless or plain harmful (as they would break boot) in a recreated ISO, so they are
+// skipped in that mode.
+BOOL iso_mode_output = FALSE;
 #define ISO_BLOCKING(x) do {x; iso_blocking_status++; } while(0)
 static const char* psz_extract_dir;
 static const char* bootmgr_name = "bootmgr";
@@ -492,7 +524,7 @@ static void fix_config(const char* psz_fullpath, const char* psz_path, const cha
 	to_windows_path(src);
 
 	// Add persistence to the kernel options
-	if ((boot_type == BT_IMAGE) && HAS_PERSISTENCE(img_report) && persistence_size) {
+	if ((boot_type == BT_IMAGE) && HAS_PERSISTENCE(img_report) && persistence_size && !iso_mode_output) {
 		if ((props->is_grub_cfg) || (props->is_menu_cfg) || (props->is_syslinux_cfg)) {
 			if (replace_in_token_data(src, props->is_grub_cfg ? "linux" : "append",
 				"file=/cdrom/preseed", "persistent file=/cdrom/preseed", TRUE) != NULL) {
@@ -541,7 +573,9 @@ static void fix_config(const char* psz_fullpath, const char* psz_path, const cha
 
 	// Workaround for config files requiring an ISO label for kernel append that may be
 	// different from our USB label. Oh, and these labels must have spaces converted to \x20.
-	if ((props->is_cfg) || (props->is_conf)) {
+	// This is a USB-only workaround, since a recreated ISO keeps the label it had, so it
+	// must be skipped in that case (doing otherwise would break the recreated ISO).
+	if (((props->is_cfg) || (props->is_conf)) && !iso_mode_output) {
 		// Older versions of GRUB EFI used "linuxefi", newer just use "linux".
 		// Also, in their great wisdom, the openSUSE maintainers added a 'set linux=linux'
 		// line to their grub.cfg, which means that their kernel option cfg_token is no longer
@@ -588,17 +622,20 @@ static void fix_config(const char* psz_fullpath, const char* psz_path, const cha
 	}
 
 	// Fix dual BIOS + EFI support for tails and other ISOs
+	// This is a USB-only workaround (the EFI bootloader needs a 'syslinux.cfg' alongside
+	// it), so we skip it when recreating an image, which must keep its original content.
 	if ( (props->is_syslinux_cfg) && (safe_stricmp(psz_path, efi_dirname) == 0) &&
 		 (safe_stricmp(psz_basename, syslinux_cfg[0]) == 0) &&
-		 (!img_report.has_efi_syslinux) && (dst = safe_strdup(src)) ) {
+		 (!img_report.has_efi_syslinux) && !iso_mode_output && (dst = safe_strdup(src)) ) {
 		dst[nul_pos-12] = 's'; dst[nul_pos-11] = 'y'; dst[nul_pos-10] = 's';
 		CopyFileA(src, dst, TRUE);
 		uprintf("Duplicated %s to %s", src, dst);
 		free(dst);
 	}
 
-	// Workaround for FreeNAS
-	if (props->is_grub_cfg) {
+	// Workaround for FreeNAS. This one substitutes the ISO mount point with the USB one,
+	// which must not be done for a recreated image, as it would break its boot.
+	if (props->is_grub_cfg && !iso_mode_output) {
 		iso_label = malloc(MAX_PATH);
 		usb_label = malloc(MAX_PATH);
 		if ((iso_label != NULL) && (usb_label != NULL)) {
@@ -1217,6 +1254,417 @@ void GetEfiBootInfo(char* buf, size_t buf_size, const char* source)
 			}
 		}
 	}
+}
+
+/*
+ * Locate the ISO-9660 file that an El Torito boot image starts at, so that we can
+ * tell oscdimg which file to use as the boot image for our repackaged ISO.
+ * If 'file_size' is not NULL, it receives the size recorded in the ISO-9660 directory
+ * record, which is exact (i.e. not rounded up to a sector) and is what we must use for
+ * 'bi_length' to stay compatible with the reference 'mkisofs -boot-info-table'.
+ * Returns TRUE if a matching path was found.
+ */
+static BOOL GetBootImagePath(iso9660_t* p_iso, uint32_t lsn, uint32_t num_sectors, char* path, size_t path_size, uint64_t* file_size)
+{
+	iso9660_stat_t* p_statbuf = NULL;
+	char* full_path = NULL;
+	char* tmp;
+	BOOL ret = FALSE;
+
+	if ((p_iso == NULL) || (path == NULL) || (path_size == 0) || (lsn == 0))
+		return FALSE;
+
+	// Try the exact LSN first, then account for ISOs that have a boot file padded with
+	// extra virtual sectors (in which case the boot image LSN points before the file).
+	for (uint32_t i = 0; i <= num_sectors; i++) {
+		p_statbuf = iso9660_ifs_find_lsn_with_path(p_iso, (lsn_t)(lsn + i), &full_path);
+		if ((p_statbuf != NULL) && (full_path != NULL) && (p_statbuf->type == _STAT_FILE)) {
+			// We want a path with a leading '/' and Unix separators
+			tmp = full_path;
+			while (*tmp == '/')
+				tmp++;
+			safe_sprintf(path, path_size, "/%s", tmp);
+			if (file_size != NULL)
+				*file_size = p_statbuf->total_size;
+			ret = TRUE;
+			break;
+		}
+		safe_free(full_path);
+		iso9660_stat_free(p_statbuf);
+		p_statbuf = NULL;
+	}
+
+	safe_free(full_path);
+	iso9660_stat_free(p_statbuf);
+	return ret;
+}
+
+/*
+ * Wrapper around GetBootImagePath() that takes an image filename instead of an already
+ * opened ISO handle.
+ */
+static BOOL GetPathOfLsn(const char* iso, uint32_t lsn, uint32_t num_sectors, char* path, size_t path_size, uint64_t* file_size)
+{
+	iso9660_t* p_iso;
+	BOOL ret;
+
+	if (iso == NULL)
+		return FALSE;
+	p_iso = iso9660_open_ext(iso, ISO_EXTENSION_MASK);
+	if (p_iso == NULL)
+		return FALSE;
+	ret = GetBootImagePath(p_iso, lsn, num_sectors, path, path_size, file_size);
+	iso9660_close(p_iso);
+	return ret;
+}
+
+/*
+ * Parse the El Torito boot catalog from a UDF/ISO9660 image and report the boot entries
+ * we need to reproduce in order to create a bootable image.
+ * Returns TRUE if at least one usable boot entry was found.
+ */
+static BOOL GetIsoBootEntries(const char* src_iso, ISO_BOOT_ENTRIES* boot)
+{
+	const uint16_t eltorito_magic = 0xAA55;
+	uint8_t catalog[ISO_BLOCKSIZE];
+	uint32_t boot_catalog_sector = 0;
+	iso9660_t* p_iso = NULL;
+	int prev_loglevel;
+	BOOL ret = FALSE;
+
+	if ((src_iso == NULL) || (boot == NULL))
+		return FALSE;
+	memset(boot, 0, sizeof(ISO_BOOT_ENTRIES));
+	prev_loglevel = cdio_loglevel_default;
+	cdio_loglevel_default = CDIO_LOG_ERROR;
+
+	// We must read the raw Volume Descriptors to locate the El Torito boot catalog, and
+	// libcdio does not expose those, so we handle the parsing ourselves.
+	p_iso = iso9660_open_ext(src_iso, ISO_EXTENSION_MASK);
+	if (p_iso == NULL)
+		goto out;
+
+	for (int i = 1; i < 32; i++) {
+		uint8_t vd[ISO_BLOCKSIZE];
+		if (iso9660_iso_seek_read(p_iso, vd, (lsn_t)(ISO_PVD_SECTOR + i), 1) != ISO_BLOCKSIZE)
+			break;
+		// Last Volume Descriptor
+		if ((vd[0] == 0xFF) && (memcmp(&vd[1], "CD001", 5) == 0))
+			break;
+		// Boot Record Volume Descriptor (must be the El Torito one)
+		if ((vd[0] == 0x00) && (memcmp(&vd[1], "CD001", 5) == 0) &&
+			(memcmp(&vd[7], "EL TORITO SPECIFICATION", 23) == 0)) {
+			boot_catalog_sector = *(uint32_t*)&vd[0x47];
+			break;
+		}
+	}
+	if (boot_catalog_sector == 0)
+		goto out;
+
+	if (iso9660_iso_seek_read(p_iso, catalog, boot_catalog_sector, 1) != ISO_BLOCKSIZE)
+		goto out;
+	// Validate the boot catalog validation entry. Note that the 0xAA55 signature is the last
+	// word of that entry, at offset 30, and not at offset 0 (which holds the header ID).
+	if (*(uint16_t*)&catalog[30] != eltorito_magic)
+		goto out;
+
+	// The catalog starts with a 32 byte validation entry, followed by a sequence of 32 byte
+	// records: a section header (0x90/0x91 in the first byte, with the platform ID in the
+	// second one) introduces the platform that the boot entries which follow belong to, a
+	// boot entry starts with 0x88, and a zero byte terminates the catalog.
+	// We collect the BIOS entries first, so that the first entry we hand to oscdimg becomes
+	// the default (BIOS) boot entry, and then do the same for the EFI entries.
+	for (int pass = 0; pass < 2; pass++) {
+		uint8_t wanted_platform = (pass == 0) ? 0x00 : 0xEF;
+		uint8_t platform_id = 0x00;	// Entries before the first section header are for 80x86
+
+		for (int i = 1; i < ISO_BLOCKSIZE / 32; i++) {
+			uint8_t* entry = &catalog[i * 32];
+			uint8_t boot_id = entry[0];
+			uint8_t media_type = entry[1] & 0x0F;
+			uint32_t lsn;
+			uint16_t num_sectors;
+			char path[MAX_PATH];
+			ISO_BOOT_ENTRY* e;
+
+			if ((boot_id & 0xF0) == 0x90) {	// Section header
+				platform_id = entry[1];
+				continue;
+			}
+			if (boot_id == 0x00)	// End of the boot catalog
+				break;
+			if (boot_id != 0x88)	// Not a boot entry
+				continue;
+			if (platform_id != wanted_platform)
+				continue;
+			// Only no-emulation entries (media type 0) can be reused as-is: floppy and hard
+			// disk emulation images are not supported by oscdimg's -bootdata.
+			if (media_type != 0)
+				continue;
+			lsn = *(uint32_t*)&entry[8];
+			num_sectors = *(uint16_t*)&entry[6];
+			if (lsn == 0)
+				continue;
+			if (boot->count >= MAX_ISO_BOOT_ENTRIES)
+				break;
+			e = &boot->entry[boot->count++];
+			e->platform_id = platform_id;
+			e->no_emulation = TRUE;
+			e->lsn = lsn;
+			e->num_sectors = num_sectors;
+			// Resolving the path is only needed to hand the file over to oscdimg, so a
+			// failure to do so must not prevent us from patching the boot info table.
+			if (GetBootImagePath(p_iso, lsn, num_sectors, path, sizeof(path), NULL)) {
+				static_sprintf(e->path, "%s", path);
+				uprintf("  El Torito %s boot image: '%s'",
+					(platform_id == 0xEF) ? "UEFI" : "BIOS", e->path);
+			} else {
+				uprintf("  El Torito %s boot image at LBA %d (could not resolve its path)",
+					(platform_id == 0xEF) ? "UEFI" : "BIOS", lsn);
+			}
+			ret = TRUE;
+		}
+	}
+
+out:
+	iso9660_close(p_iso);
+	// Restore the log level we lowered, so that the rest of the run keeps reporting warnings
+	cdio_loglevel_default = prev_loglevel;
+	return ret;
+}
+
+/*
+ * Build the '-bootdata' argument that oscdimg needs in order to produce a bootable image
+ * that retains the boot entries from the source ISO. Returns TRUE if a bootdata string
+ * could be produced.
+ */
+BOOL GetIsoBootData(const char* src_iso, const char* iso_root, char* bootdata, size_t bootdata_size)
+{
+	ISO_BOOT_ENTRIES boot;
+	char entry_str[4 * MAX_PATH];
+	int n = 0, i;
+
+	if ((bootdata == NULL) || (bootdata_size == 0))
+		return FALSE;
+	bootdata[0] = 0;
+	if (!GetIsoBootEntries(src_iso, &boot) || (boot.count == 0))
+		return FALSE;
+
+	for (i = 0; i < (int)boot.count; i++) {
+		char disk_path[MAX_PATH];
+		// An entry whose path we could not resolve cannot be handed over to oscdimg
+		if (boot.entry[i].path[0] == 0)
+			continue;
+		// Convert the ISO path ('/boot/syslinux/isolinux.bin') into a path we can
+		// reference from the extraction directory we are going to hand over to oscdimg.
+		static_sprintf(disk_path, "%s%s", iso_root, boot.entry[i].path);
+		to_windows_path(disk_path);
+		if (!PathFileExistsU(disk_path)) {
+			uprintf("WARNING: Could not find boot file '%s' - the resulting image may not be bootable", disk_path);
+			continue;
+		}
+		static_sprintf(entry_str, "%sp%02X,e,b\"%s\"",
+			(n == 0) ? "" : "#", boot.entry[i].platform_id, disk_path);
+		if (strlen(bootdata) + strlen(entry_str) + 2 >= bootdata_size) {
+			uprintf("ERROR: Not enough space to build the bootdata string");
+			return FALSE;
+		}
+		strcat(bootdata, entry_str);
+		n++;
+	}
+	if (n == 0)
+		return FALSE;
+
+	// Prefix with the number of boot entries we are providing
+	memmove(bootdata + 2, bootdata, strlen(bootdata) + 1);
+	bootdata[0] = (char)('0' + MIN(n, 9));
+	bootdata[1] = '#';
+	return TRUE;
+}
+
+/*
+ * Compute the El Torito boot info table checksum, which is the 32-bit sum of every
+ * little-endian DWORD of the boot file, from offset 64, with the file zero-padded to
+ * a multiple of 2048 bytes.
+ */
+/*
+ * Compute the El Torito boot info table checksum. This must produce the exact same value
+ * as the reference 'mkisofs -boot-info-table' implementation, whose algorithm is:
+ *   - skip the first 64 bytes (they hold the boot info table itself),
+ *   - read the file one 2048 byte sector at a time,
+ *   - zero-pad the first sector to 2048 bytes when the file is shorter than that, and
+ *     zero-pad the last sector when the file size is not a multiple of 2048,
+ *   - sum every little-endian DWORD of the resulting 2048 byte blocks.
+ * Note that this is also exactly what isolinux re-computes on boot, so a mismatch here
+ * means the recreated image would fail its self-check and refuse to boot.
+ */
+static uint32_t ComputeBootInfoCsum(const uint8_t* buf, size_t len)
+{
+	uint32_t csum = 0, dw;
+	size_t i, nb_blocks = (len + ISO_BLOCKSIZE - 1) / ISO_BLOCKSIZE;
+
+	for (i = 0; i < nb_blocks; i++) {
+		size_t start = i * ISO_BLOCKSIZE;
+		// Number of bytes of this block that actually exist in the buffer. Note that this
+		// is NOT 'MIN(start + ISO_BLOCKSIZE, len)' compared against absolute offsets, as
+		// that would let the last (partial) block read up to a full block past the end of
+		// the buffer.
+		size_t avail = MIN(ISO_BLOCKSIZE, len - start);
+		size_t j = (i == 0) ? 64 : 0;	// Bytes 0-63 (the table itself) are not summed
+
+		for (; j + 4 <= avail; j += 4) {
+			// Do not cast the pointer: 'start + j' is only guaranteed to be 2 byte aligned
+			memcpy(&dw, &buf[start + j], sizeof(dw));
+			csum += dw;
+		}
+		// The missing bytes of a partial block count as zero, so nothing to add
+	}
+	return csum;
+}
+
+/*
+ * Patch the El Torito boot info table ('bi_pvd', 'bi_file', 'bi_length' and 'bi_csum') that
+ * bootloaders such as isolinux use to locate and validate themselves. mkisofs/mkisofs-based
+ * tools perform this patching through '-boot-info-table', but oscdimg does not, which means
+ * that, unless we redo it, a repackaged image would end up with a bootstrap that points to
+ * the wrong location and fails its checksum verification => the image would NOT boot.
+ * Returns TRUE if a boot info table was found and patched.
+ */
+static BOOL PatchElToritoBootInfoTable(const char* iso, uint32_t lsn, uint16_t num_sectors)
+{
+	uint8_t* buf = NULL;
+	uint32_t iso_size, csum;
+	uint64_t file_size = 0;
+	HANDLE hFile = INVALID_HANDLE_VALUE;
+	LARGE_INTEGER li;
+	DWORD wr_size;
+	char path[MAX_PATH];
+	BOOL ret = FALSE;
+
+	if ((iso == NULL) || (lsn == 0))
+		return FALSE;
+
+	// The boot file is stored contiguously at the El Torito image LBA, but one of the
+	// BIOS entries of LXDE/Lenovo style ISOs uses floppy emulation, which we must not patch.
+	// Also, isolinux only ever uses a boot info table for the first (no-emulation) entry.
+	// While we are at it, get the exact file size from the ISO-9660 directory record, which
+	// is what 'bi_length' must be set to.
+	if (!GetPathOfLsn(iso, lsn, num_sectors, path, sizeof(path), &file_size))
+		return FALSE;
+	// Only no-emulation 'isolinux.bin'/'boot.bin' images embed a boot info table; El Torito
+	// floppy/hard disk emulation images (e.g. '[BOOT]/1-Boot-NoEmul.img' wrappers) do not.
+	{
+		const char* basename = strrchr(path, '/');
+		int i;
+		BOOLEAN match = FALSE;
+		basename = (basename == NULL) ? path : basename + 1;
+		for (i = 0; i < ARRAYSIZE(isolinux_bin); i++) {
+			if (safe_stricmp(basename, isolinux_bin[i]) == 0) {
+				match = TRUE;
+				break;
+			}
+		}
+		if (!match)
+			return FALSE;
+	}
+
+	// The checksum is computed over the whole boot file, and the length we need for it is
+	// the exact size recorded in the ISO-9660 directory record. Fall back to what the El
+	// Torito entry accounts for if that file could not be sized.
+	iso_size = (uint32_t)MIN(file_size, MAX_ISO_BOOT_IMAGE_SIZE);
+	if (iso_size == 0)
+		iso_size = (uint32_t)num_sectors * 512;
+	if (iso_size < ISO_BLOCKSIZE)	// isolinux always sums a full first sector
+		iso_size = ISO_BLOCKSIZE;
+	buf = malloc(iso_size);
+	if (buf == NULL)
+		goto out;
+	hFile = CreateFileU(iso, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ,
+		NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (hFile == INVALID_HANDLE_VALUE) {
+		uprintf("Could not open '%s' to patch its boot info table: %s", iso, WindowsErrorString());
+		goto out;
+	}
+	li.QuadPart = (LONGLONG)lsn * ISO_BLOCKSIZE;
+	if ((!SetFilePointerEx(hFile, li, NULL, FILE_BEGIN)) ||
+		(!ReadFile(hFile, buf, iso_size, &wr_size, NULL)) || (wr_size != iso_size)) {
+		uprintf("Could not read the boot info table at LBA %d: %s", lsn, WindowsErrorString());
+		goto out;
+	}
+
+	{
+		uint32_t bi_file = *(uint32_t*)&buf[BOOT_INFO_TABLE_OFFSET + 4];
+		uint32_t bi_length = *(uint32_t*)&buf[BOOT_INFO_TABLE_OFFSET + 8];
+		uint32_t bi_csum = *(uint32_t*)&buf[BOOT_INFO_TABLE_OFFSET + 12];
+		// A boot info table is present if the bootloader was already patched, in which case
+		// 'bi_file' holds its LBA (isolinux itself uses 'bi_file != 0' to detect the table),
+		// or if it is still the stock bootloader, which ships 0xdeadbeef in 'bi_length' and
+		// 'bi_csum' precisely so that a mastering tool fills the table in. Both states must
+		// be patched: 'mkisofs -boot-info-table' also always patches, and we only ever get
+		// here for 'isolinux.bin'/'boot.bin'.
+		if ((bi_file == 0) && (bi_length != 0xdeadbeef) && (bi_csum != 0xdeadbeef)) {
+			uprintf("No boot info table to patch at LBA %d ('%s')", lsn, path);
+			goto out;
+		}
+	}
+
+	csum = ComputeBootInfoCsum(buf, iso_size);
+
+	// 'bi_pvd' is the LBA of the Primary Volume Descriptor and always 16, 'bi_file' must
+	// point at the location the bootloader will be loaded from (i.e. this very LBA),
+	// 'bi_length' is the exact size of the boot file and 'bi_csum' its checksum.
+	*(uint32_t*)&buf[BOOT_INFO_TABLE_OFFSET] = (uint32_t)ISO_PVD_SECTOR;
+	*(uint32_t*)&buf[BOOT_INFO_TABLE_OFFSET + 4] = lsn;
+	*(uint32_t*)&buf[BOOT_INFO_TABLE_OFFSET + 8] = iso_size;
+	*(uint32_t*)&buf[BOOT_INFO_TABLE_OFFSET + 12] = csum;
+
+	// Write the table back to its actual location, which is 8 bytes into the boot file,
+	// not at the start of the boot file itself.
+	li.QuadPart = (LONGLONG)lsn * ISO_BLOCKSIZE + BOOT_INFO_TABLE_OFFSET;
+	if ((!SetFilePointerEx(hFile, li, NULL, FILE_BEGIN)) ||
+		(!WriteFileWithRetry(hFile, &buf[BOOT_INFO_TABLE_OFFSET], 16, &wr_size, WRITE_RETRIES)) || (wr_size != 16)) {
+		uprintf("Could not patch the boot info table of '%s': %s", path, WindowsErrorString());
+		goto out;
+	}
+	uprintf("  Patched '%s' boot info table (LBA=%d, Length=%d, Checksum=0x%08X)",
+		path, lsn, iso_size, csum);
+	ret = TRUE;
+
+out:
+	safe_closehandle(hFile);
+	safe_free(buf);
+	return ret;
+}
+
+/*
+ * Patch the boot info table of every El Torito boot image that can carry one. This must be
+ * called *after* the image has been repackaged with oscdimg, as we need the final LBA of
+ * each boot file.
+ */
+BOOL PatchIsoBootInfoTables(const char* iso)
+{
+	ISO_BOOT_ENTRIES boot;
+	BOOL ret = FALSE;
+	int i;
+
+	if (iso == NULL)
+		return FALSE;
+	if (!GetIsoBootEntries(iso, &boot))
+		return FALSE;
+
+	for (i = 0; i < (int)boot.count; i++) {
+		// We never patch the UEFI FAT images, as only isolinux/syslinux relies on boot info tables
+		if (boot.entry[i].platform_id != 0x00)
+			continue;
+		// Only no-emulation images can embed a boot info table
+		if (!boot.entry[i].no_emulation)
+			continue;
+		// The boot file may have been elided from the ISO-9660 tree (e.g. an '[BOOT]/1-Boot-NoEmul.img'
+		// style symlink or a file we could not resolve), but its El Torito LBA is what matters here.
+		if (PatchElToritoBootInfoTable(iso, boot.entry[i].lsn, boot.entry[i].num_sectors))
+			ret = TRUE;
+	}
+	return ret;
 }
 
 BOOL ExtractISO(const char* src_iso, const char* dest_dir, BOOL scan)
@@ -2267,4 +2715,302 @@ out:
 	safe_free(img_save->DevicePath);
 	safe_free(img_save->ImagePath);
 	ExitThread(r);
+}
+
+/*
+ * Create a new ISO image from the currently selected ISO image, applying the modifications
+ * Rufus would apply for a USB installation, while preserving the ability to boot. The
+ * original image is left untouched.
+ */
+typedef struct {
+	char* ImagePath;			// Destination '.iso' file
+	char* Label;				// Volume label of the new image
+} ISO_CREATE;
+
+static void RemoveIsoExtractDir(const char* dir)
+{
+	if ((dir != NULL) && (dir[0] != 0))
+		SHDeleteDirectoryExU(hMainDialog, dir, FOF_SILENT | FOF_NOERRORUI | FOF_NOCONFIRMATION);
+}
+
+// Worker thread that produces the modified ISO
+static DWORD WINAPI IsoCreateThread(void* param)
+{
+	ISO_CREATE* iso_create = (ISO_CREATE*)param;
+	char *extract_dir = NULL, *out_path = NULL;
+	char cmd[4 * KB], bootdata[3 * KB], oscdimg[MAX_PATH], root[4 * MAX_PATH];
+	DWORD r = ERROR_NOT_FOUND, attr;
+	HANDLE exe = INVALID_HANDLE_VALUE;
+	ULONGLONG free_space;
+
+	if_assert_fails(iso_create->ImagePath != NULL)
+		goto out;
+	out_path = iso_create->ImagePath;
+
+	// Create the directory that is going to receive the contents of the original image
+	extract_dir = malloc(MAX_PATH);
+	if (extract_dir == NULL) {
+		ErrorStatus = RUFUS_ERROR(ERROR_NOT_ENOUGH_MEMORY);
+		goto out;
+	}
+	// NB: GetTempDirNameU() does not set the buffer when it fails, so zero it first, or the
+	// cleanup at 'cleanup_dir:/out:' would hand a stale/undefined path to RemoveIsoExtractDir().
+	extract_dir[0] = 0;
+	if (GetTempDirNameU(temp_dir, APPLICATION_NAME, 0, extract_dir) == 0) {
+		uprintf("Could not create a temporary directory: %s", WindowsErrorString());
+		ErrorStatus = RUFUS_ERROR(ERROR_OPEN_FAILED);
+		goto out;
+	}
+	// Sanity check: what we are about to delete must be the empty directory we created.
+	// Note that a failed GetFileAttributesU() returns INVALID_FILE_ATTRIBUTES, which has
+	// every bit set, so it must be tested for explicitly to catch a non-existent directory.
+	attr = GetFileAttributesU(extract_dir);
+	if ((attr == INVALID_FILE_ATTRIBUTES) || (!(attr & FILE_ATTRIBUTE_DIRECTORY))) {
+		uprintf("Unexpected temporary directory '%s' - aborting", extract_dir);
+		extract_dir[0] = 0;	// Do not delete a directory we did not verify
+		ErrorStatus = RUFUS_ERROR(ERROR_PATH_NOT_FOUND);
+		goto out;
+	}
+
+	// Make sure that we have enough space to hold the whole image
+	if (GetDiskFreeSpaceExA(extract_dir, (PULARGE_INTEGER)&free_space, NULL, NULL) &&
+		(free_space < (img_report.projected_size + (img_report.projected_size >> 2)))) {
+		uprintf("Not enough free space to extract the image (need about %s, have %s)",
+			SizeToHumanReadable(img_report.projected_size, FALSE, FALSE),
+			SizeToHumanReadable((uint64_t)free_space, FALSE, FALSE));
+		ErrorStatus = RUFUS_ERROR(ERROR_DISK_FULL);
+		goto cleanup_dir;
+	}
+
+	// Get a lock and validate that the oscdimg.exe we are about to run has not been tampered with
+	static_sprintf(oscdimg, "%s\\%s\\oscdimg_%s.exe", app_data_dir, FILES_DIR, APPLICATION_ARCH);
+	exe = CreateFileU(oscdimg, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (exe == INVALID_HANDLE_VALUE) {
+		uprintf("ERROR: Could not lock 'oscdimg.exe'");
+		r = GetLastError();
+		ErrorStatus = RUFUS_ERROR(r);
+		goto cleanup_dir;
+	}
+	if (!FileMatchesHash(oscdimg, OSCDIMG_HASH)) {
+		uprintf("ERROR: Existing 'oscdimg.exe' hash does not match expected value!");
+		ErrorStatus = RUFUS_ERROR(ERROR_INVALID_IMAGE_HASH);
+		goto cleanup_dir;
+	}
+
+	// Extract the contents of the source image. Setting iso_mode_output makes sure that the
+	// USB-specific patches (which would break a recreated ISO) are not applied.
+	uprintf("Extracting image to '%s'...", extract_dir);
+	IGNORE_RETVAL(_chdirU(app_data_dir));
+	iso_mode_output = TRUE;
+	if (!ExtractISO(image_path, extract_dir, FALSE)) {
+		if (!IS_ERROR(ErrorStatus))
+			ErrorStatus = RUFUS_ERROR(APPERR(ERROR_ISO_EXTRACT));
+		goto out;
+	}
+	// Recreate the extended label / icon files if the user asked for them. Since we are
+	// patching the extracted tree, this works exactly like it does for a USB drive.
+	// Note that, like ApplyWindowsCustomization() below, SetAutorun() expects a root that
+	// ends with a path separator, whereas GetTempDirNameU() does not append one.
+	static_sprintf(root, "%s\\", extract_dir);
+	if (IsChecked(IDC_EXTENDED_LABEL))
+		SetAutorun(root);
+
+	// Apply the Windows customization the same way we would for a USB drive. This is what makes
+	// this feature useful, as it is the whole point of creating a modified Windows installation ISO.
+	if (unattend_xml_path != NULL) {
+		if (!ApplyWindowsCustomization(root, unattend_xml_flags)) {
+			if (!IS_ERROR(ErrorStatus))
+				ErrorStatus = RUFUS_ERROR(APPERR(ERROR_CANT_PATCH));
+			goto out;
+		}
+	}
+
+	if (!GetIsoBootData(image_path, extract_dir, bootdata, sizeof(bootdata))) {
+		uprintf("ERROR: Could not determine the boot parameters of the source image.");
+		uprintf("Because of this, the created image would not be bootable.");
+		ErrorStatus = RUFUS_ERROR(APPERR(ERROR_ISO_SCAN));
+		goto out;
+	}
+	uprintf("Will use '-bootdata:%s' to keep the recreated image bootable", bootdata);
+
+	// ISO-9660 + UDF are both needed:
+	// - The BIOS and UEFI bootloaders, which are embedded as El Torito boot images, can only
+	//   read ISO-9660. Windows Setup however reads the files from the UDF tree, which is why
+	//   we cannot just produce a UDF-only image like IsoSaveImageThread() does.
+	// - We must not use Joliet ('-j1'): oscdimg rejects any image whose Joliet volume label is
+	//   longer than 16 characters, and Windows installation images normally have a longer label
+	//   that we must preserve (the bootloaders reference it). It also provides nothing that UDF
+	//   does not already give us, as the ISO-9660 tree oscdimg produces is identical with or
+	//   without it.
+	// - UDF is required on top of ISO-9660, because Microsoft's implementation of ISO-9660 does
+	//   not support multiextent and therefore silently truncates any file that is 4 GB or larger
+	//   to exactly 4 GB (see the comment in IsoSaveImageThread()), which would quietly corrupt
+	//   the 'install.wim' of most Windows installation images.
+	// Also, oscdimg cannot create Rock Ridge extensions, so the ones from the source image are lost.
+	if (img_report.has_symlinks || enable_rockridge)
+		uprintf("NOTE: The recreated image will not contain Rock Ridge extensions, which may affect images that use symbolic links.");
+
+	static_sprintf(cmd, "\"%s\" -h -m -o -u1 -udfver102 -l\"%s\" -bootdata:%s \"%s\" \"%s\"",
+		oscdimg, iso_create->Label, bootdata, extract_dir, out_path);
+	uprintf("Running command: '%s'", cmd);
+	r = RunCommandWithProgress(cmd, sysnative_dir, FALSE, MSG_261, ".*\r([0-9\\.]+)% complete.*");
+	if (r != 0) {
+		uprintf("Failed to create ISO image: %s", WindowsErrorString());
+		ErrorStatus = RUFUS_ERROR(SCODE_CODE(r));
+		goto out;
+	}
+
+	// oscdimg does not update the El Torito boot info table of the bootloaders it embeds,
+	// which means that isolinux would fail to locate (and checksum) itself. We must redo
+	// this patching ourselves, or the recreated image will not boot.
+	// Only isolinux/syslinux uses such a table: Windows bootloaders ('etfsboot.com',
+	// 'bootmgr', 'bootx64.efi') do not embed one at all, so the absence of a table is
+	// only a problem if the source image actually used syslinux.
+	uprintf("Patching boot information tables...");
+	if (!PatchIsoBootInfoTables(out_path) && HAS_SYSLINUX(img_report))
+		uprintf("WARNING: No boot info table was patched for a syslinux image - the created image may not boot.");
+
+cleanup_dir:
+	// We created the temporary directory but never got as far as extracting into it,
+	// so remove it here (the 'out:' path does this for every later failure).
+	RemoveIsoExtractDir(extract_dir);
+	extract_dir[0] = 0;
+out:
+	safe_closehandle(exe);
+	iso_mode_output = FALSE;
+	RemoveIsoExtractDir(extract_dir);
+	safe_free(extract_dir);
+	PostMessage(hMainDialog, UM_FORMAT_COMPLETED, (WPARAM)TRUE, 0);
+	if (!IS_ERROR(ErrorStatus))
+		uprintf("Created bootable image '%s'", out_path);
+	safe_free(iso_create->ImagePath);
+	safe_free(iso_create->Label);
+	ExitThread(r);
+}
+
+/*
+ * Entry point to create a modified copy of the currently selected ISO image.
+ * Returns TRUE if the operation was started.
+ */
+BOOL CreateModifiedISO(void)
+{
+	static ISO_CREATE iso_create = { 0 };
+	char filename[MAX_PATH];
+	int i;
+	EXT_DECL(img_ext, filename, __VA_GROUP__("*.iso"), __VA_GROUP__(lmprintf(MSG_036)));
+
+	if ((format_thread != NULL) || (image_path == NULL) || !img_report.is_iso || iso_mode_output)
+		return FALSE;
+	if (IS_DD_ONLY(img_report)) {
+		uprintf("This image can only be written in DD mode and cannot be recreated as an ISO.");
+		ErrorStatus = RUFUS_ERROR(APPERR(ERROR_ISO_SCAN));
+		return FALSE;
+	}
+
+	// A file with the same name as the source cannot be used as the destination, as we
+	// would be left with a truncated image if the operation failed or was cancelled.
+	static_sprintf(filename, "%s_modified.iso", img_report.label);
+	iso_create.ImagePath = FileDialog(TRUE, filename, &img_ext, 0);
+	if (iso_create.ImagePath == NULL) {
+		// Report this as a cancellation, like SaveImage() does, so that the caller does not
+		// turn it into a spurious error notification.
+		ErrorStatus = RUFUS_ERROR(ERROR_CANCELLED);
+		return FALSE;
+	}
+	if (GetFullPathNameU(image_path, MAX_PATH, filename, NULL) == 0)
+		filename[0] = 0;
+	if (safe_stricmp(iso_create.ImagePath, filename) == 0) {
+		uprintf("ERROR: The destination image must be different from the source image.");
+		ErrorStatus = RUFUS_ERROR(ERROR_INVALID_PARAMETER);
+		safe_free(iso_create.ImagePath);
+		return FALSE;
+	}
+
+	// Ask how the Windows installation should be customized. This also generates the
+	// unattend.xml that the worker thread applies to the extracted image.
+	if (!PromptForWindowsCustomization()) {
+		ErrorStatus = RUFUS_ERROR(ERROR_CANCELLED);
+		goto out;
+	}
+
+	// Always reuse the label of the source image. This is deliberate: the bootloaders and
+	// config files of a bootable image reference it by that label, and unlike for a USB drive
+	// we cannot safely rewrite those references in every case, so renaming the image could
+	// render it unbootable.
+	iso_create.Label = malloc(64);
+	if (iso_create.Label == NULL) {
+		ErrorStatus = RUFUS_ERROR(ERROR_NOT_ENOUGH_MEMORY);
+		safe_free(iso_create.ImagePath);
+		return FALSE;
+	}
+	safe_strcpy(iso_create.Label, 64, img_report.label);
+	// ISO-9660 volume identifiers are limited to 32 characters, which is also the limit oscdimg
+	// enforces on a UDF logical volume identifier. A longer label cannot be represented, and a
+	// bootloader that references the untruncated label would not find the image any more.
+	if (safe_strlen(img_report.label) > 32) {
+		uprintf("WARNING: The '%s' label of the source image is longer than 32 characters.", img_report.label);
+		uprintf("The recreated image will be truncated to '%s' and may not boot.", iso_create.Label);
+	}
+	iso_create.Label[32] = 0;
+	if (iso_create.Label[0] == 0)
+		safe_strcpy(iso_create.Label, 64, "RUFUS_ISO");
+	// The label comes from the image itself, and a UDF logical volume identifier is UCS-2 and
+	// therefore free to contain a double quote, which would break out of the '-l"%s"' quoting
+	// of the command line we build below. A label containing a quote cannot belong to a Windows
+	// installation anyway (its bootloaders would not match it), so neutralise the character.
+	for (i = 0; iso_create.Label[i] != 0; i++) {
+		if (iso_create.Label[i] == '"')
+			iso_create.Label[i] = '_';
+	}
+	// The label of the recreated image is always the one of the source, but it may differ from
+	// whatever the user typed in the label field, so let them know about it.
+	filename[0] = 0;
+	IGNORE_RETVAL(GetWindowTextU(hLabel, filename, sizeof(filename)));
+	if (safe_strcmp(filename, iso_create.Label) != 0)
+		uprintf("NOTE: The recreated image will keep the '%s' label of the source image.", iso_create.Label);
+	if (append_silent && strstr(iso_create.Label, " (SILENT)") == NULL)
+		safe_strcat(iso_create.Label, 64, " (SILENT)");
+	// Keep the label within the 32 character limit of an ISO-9660 volume identifier
+	iso_create.Label[32] = 0;
+
+	// ISO support requires oscdimg.exe. If not already present, attempt to download it.
+	static_sprintf(filename, "%s\\%s\\oscdimg_%s.exe", app_data_dir, FILES_DIR, APPLICATION_ARCH);
+	if (!PathFileExistsU(filename)) {
+		if (Notification(MB_YESNO | MB_ICONWARNING, lmprintf(MSG_115), lmprintf(MSG_337, "oscdimg.exe")) != IDYES) {
+			ErrorStatus = RUFUS_ERROR(ERROR_CANCELLED);
+			goto out;
+		}
+		IGNORE_RETVAL(_chdirU(app_data_dir));
+		IGNORE_RETVAL(_mkdir(FILES_DIR));
+		if (DownloadToFileOrBufferEx(OSCDIMG_URL, filename, SYMBOL_SERVER_USER_AGENT, NULL, hMainDialog, FALSE) < 64 * KB) {
+			ErrorStatus = GetLastError();
+			goto out;
+		}
+	}
+
+	// Disable all controls except Cancel
+	// Note that image_options still has IMOP_ISO_OUTPUT set, so the controls that only apply
+	// to a target drive are handled as such for this device-less operation.
+	EnableControls(FALSE, FALSE);
+	ErrorStatus = 0;
+	SendMessage(hMainDialog, UM_PROGRESS_INIT, 0, 0);
+	InitProgress(TRUE);
+	format_thread = CreateThread(NULL, 0, IsoCreateThread, &iso_create, 0, NULL);
+	if (format_thread != NULL) {
+		uprintf("\r\nCreate ISO operation started");
+		PrintInfo(0, -1);
+		SendMessage(hMainDialog, UM_TIMER_START, 0, 0);
+		return TRUE;
+	}
+
+	uprintf("Unable to start ISO creation thread");
+	ErrorStatus = RUFUS_ERROR(APPERR(ERROR_CANT_START_THREAD));
+out:
+	// If we never handed the operation over to the worker thread, we must re-enable the UI,
+	// as nothing else is going to do it for us.
+	if (format_thread == NULL)
+		EnableControls(TRUE, FALSE);
+	safe_free(iso_create.ImagePath);
+	safe_free(iso_create.Label);
+	return FALSE;
 }

@@ -275,6 +275,7 @@ void GetFullWidth(HWND hDlg)
 	// Go through the Image Options for Windows To Go
 	fw = max(fw, GetTextSize(hImageOption, lmprintf(MSG_117)).cx);
 	fw = max(fw, GetTextSize(hImageOption, lmprintf(MSG_118)).cx);
+	fw = max(fw, GetTextSize(hImageOption, lmprintf(MSG_375)).cx);
 
 	// Now deal with full length checkbox lines
 	for (i = 0; i<ARRAYSIZE(full_width_checkboxes); i++)
@@ -778,15 +779,21 @@ void SetPersistenceSize(void)
 // Toggle the Image Option dropdown (Windows To Go or persistence settings)
 void ToggleImageOptions(void)
 {
-	BOOL has_wintogo, has_persistence;
+	BOOL has_wintogo, has_persistence, has_iso_output;
 	uint8_t entry_image_options = image_options;
 	int i, shift = rh;
 
 	has_wintogo = ((boot_type == BT_IMAGE) && (image_path != NULL) && (img_report.is_iso || img_report.is_windows_img) &&
 		(WindowsVersion.Version >= WINDOWS_8) && (HAS_WINTOGO(img_report)));
 	has_persistence = ((boot_type == BT_IMAGE) && (image_path != NULL) && (img_report.is_iso) && (HAS_PERSISTENCE(img_report)));
+	// Saving a modified copy of the image is only offered for Windows installation images, as the
+	// modifications that can be carried over to an ISO are the Windows ones (plus the label/icon).
+	has_iso_output = ((boot_type == BT_IMAGE) && (image_path != NULL) && HAS_ISO_OUTPUT(img_report));
 
-	assert(popcnt8(image_options) <= 1);
+	// The Windows To Go and persistence options are mutually exclusive, but both can coexist
+	// with the ISO output option, which is not a drive specific operation, so only assert on
+	// the bits that do have to be exclusive.
+	assert(popcnt8(image_options & (IMOP_WINTOGO | IMOP_PERSISTENCE)) <= 1);
 
 	// Keep a copy of the "Image Option" text (so that we don't have to duplicate its translation in the .loc)
 	if (image_option_txt[0] == 0)
@@ -812,8 +819,18 @@ void ToggleImageOptions(void)
 		}
 	}
 
-	if ( ((entry_image_options != 0) && (has_wintogo || has_persistence)) ||
-		 ((entry_image_options == 0) && !(has_wintogo || has_persistence)) )
+	if (((has_iso_output) && !(image_options & IMOP_ISO_OUTPUT)) ||
+		((!has_iso_output) && (image_options & IMOP_ISO_OUTPUT))) {
+		image_options ^= IMOP_ISO_OUTPUT;
+		if (image_options & IMOP_ISO_OUTPUT) {
+			SetWindowTextU(GetDlgItem(hMainDialog, IDS_IMAGE_OPTION_TXT), image_option_txt);
+			// Set the ISO creation selection in the dropdown
+			IGNORE_RETVAL(ComboBox_SetCurSel(hImageOption, imop_win_sel));
+		}
+	}
+
+	if ( ((entry_image_options != 0) && (has_wintogo || has_persistence || has_iso_output)) ||
+		 ((entry_image_options == 0) && !(has_wintogo || has_persistence || has_iso_output)) )
 		shift = 0;
 
 	if (shift != 0) {
