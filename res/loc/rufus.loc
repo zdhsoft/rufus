@@ -641,6 +641,10 @@ t MSG_371 "If you use this option, please make sure to disconnect every disk fro
 t MSG_372 "I WILL ensure that all disks, except the one I want to install Windows on, are disconnected."
 t MSG_373 "I WILL ensure that I don't leave this media plugged on a PC I do not plan to erase."
 t MSG_374 "I AGREE that any data loss resulting from the use of this option lies entirely with me."
+t MSG_375 "Write to USB"
+t MSG_376 "Create ISO"
+t MSG_377 "Only Windows 10 or Windows 11 installation images are accepted"
+t MSG_378 "Local image"
 
 # The following messages are for the Windows Store listing only and are not used by the application
 t MSG_900 "Rufus is a utility that helps format and create bootable USB flash drives, such as USB keys/pendrives, memory sticks, etc."
@@ -2006,6 +2010,10 @@ t MSG_371 "如果您使用此选项，请务必断开目标电脑上除要安装
 t MSG_372 "我将确保除要安装 Windows 的磁盘外，所有其他磁盘均已断开连接。"
 t MSG_373 "我将确保不会将此介质插在我不打算擦除的电脑上。"
 t MSG_374 "我同意因使用此选项而导致的任何数据丢失完全由我自己负责。"
+t MSG_375 "写入 U 盘"
+t MSG_376 "生成 ISO"
+t MSG_377 "只接受 Windows 10 或 Windows 11 安装镜像"
+t MSG_378 "本地镜像"
 t MSG_900 "Rufus 是一个帮助您格式化并创建可启动 USB 驱动器（如 U 盘和存储卡）的工具。"
 t MSG_901 "官方网站: %s"
 t MSG_902 "源代码: %s"

@@ -26,7 +26,8 @@ extern int wintogo_index, wininst_index;
 extern char* unattend_xml_path;
 
 char* CreateUnattendXml(int arch, int flags);
-BOOL ApplyWindowsCustomization(char drive_letter, int flags);
+BOOL ApplyWindowsCustomization(const char* root, int flags);
+BOOL PromptForWindowsCustomization(void);
 int SetWinToGoIndex(void);
 BOOL SetupWinPE(char drive_letter);
 BOOL SetupWinToGo(DWORD DriveIndex, const char* drive_name, BOOL use_esp);

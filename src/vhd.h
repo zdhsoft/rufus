@@ -114,3 +114,4 @@ extern void VhdUnmountImage(void);
 extern BOOL SaveImage(void);
 extern void OpticalDiscSaveImage(void);
 extern DWORD WINAPI IsoSaveImageThread(void* param);
+extern BOOL CreateModifiedISO(void);

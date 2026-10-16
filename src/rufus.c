@@ -36,7 +36,7 @@
 #include <dbt.h>
 #include <io.h>
 #include <getopt.h>
-#include <assert.h>
+#include <commctrl.h>
 #include <delayimp.h>
 
 #include "rufus.h"
@@ -131,6 +131,7 @@ BOOL zero_drive = FALSE, list_non_usb_removable_drives = FALSE, enable_file_inde
 BOOL write_as_image = FALSE, write_as_esp = FALSE, use_vds = FALSE, ignore_boot_marker = FALSE, save_image = FALSE;
 BOOL appstore_version = FALSE, is_vds_available = TRUE, persistent_log = FALSE, has_ffu_support = FALSE;
 BOOL expert_mode = FALSE, use_rufus_mbr = TRUE, bcdboot_supports_ex = FALSE, append_silent = FALSE;
+BOOL iso_create_mode = FALSE;
 float fScale = 1.0f;
 int dialog_showing = 0, selection_default = BT_IMAGE, persistence_unit_selection = -1, imop_win_sel = 0;
 int default_fs, fs_type, boot_type, partition_type, target_type;
@@ -819,8 +820,9 @@ static void EnableBootOptions(BOOL enable, BOOL remove_checkboxes)
 {
 	BOOL actual_enable_bb, actual_enable = enable;
 
-	// If no device is selected, don't enable anything and also don't remove the checkboxes
-	if (ComboBox_GetCurSel(hDeviceList) < 0) {
+	// If no device is selected, don't enable anything and also don't remove the checkboxes,
+	// unless we are creating a new ISO image, which does not need a target drive.
+	if ((ComboBox_GetCurSel(hDeviceList) < 0) && !IS_ISO_OUTPUT()) {
 		actual_enable = FALSE;
 		remove_checkboxes = FALSE;
 	}
@@ -871,6 +873,8 @@ void EnableControls(BOOL enable, BOOL remove_checkboxes)
 	SendMessage(hMultiToolbar, TB_ENABLEBUTTON, (WPARAM)IDC_LANG, (LPARAM)enable);
 	SendMessage(hMultiToolbar, TB_ENABLEBUTTON, (WPARAM)IDC_ABOUT, (LPARAM)enable);
 	SendMessage(hMultiToolbar, TB_ENABLEBUTTON, (WPARAM)IDC_SETTINGS, (LPARAM)enable);
+	if (GetDlgItem(hMainDialog, IDC_MODE_TAB) != NULL)
+		EnableWindow(GetDlgItem(hMainDialog, IDC_MODE_TAB), enable);
 
 	// Hash button is enabled if an image has been selected
 	EnableWindow(hHashToolbar, enable && (boot_type == BT_IMAGE) && (image_path != NULL));
@@ -878,15 +882,35 @@ void EnableControls(BOOL enable, BOOL remove_checkboxes)
 	// Toggle CLOSE/CANCEL
 	SetDlgItemTextU(hMainDialog, IDCANCEL, enable ? uppercase_close : uppercase_cancel);
 
+	// Creating a new ISO does not require a target drive, so don't disable the controls that
+	// are needed to pick the image options for it when no device is selected.
+	if (IS_ISO_OUTPUT())
+		remove_checkboxes = FALSE;
+
+	// The Save toolbar dumps the selected drive to an image, so it requires that drive to be
+	// selected, but it must also stay disabled while another operation is in progress.
+	EnableWindow(hSaveToolbar, enable && (ComboBox_GetCurSel(hDeviceList) >= 0));
+
 	// Only enable the following controls if a device is active
-	enable = (ComboBox_GetCurSel(hDeviceList) < 0) ? FALSE : enable;
+	enable = ((ComboBox_GetCurSel(hDeviceList) < 0) && !IS_ISO_OUTPUT()) ? FALSE : enable;
 	EnableWindow(hImageOption, enable);
-	EnableWindow(hSaveToolbar, enable);
 
 	// Enable or disable the Start button and the other boot options
 	enable = ((boot_type == BT_IMAGE) && (image_path == NULL)) ? FALSE : enable;
 	EnableWindow(hStart, enable);
 	EnableBootOptions(enable, remove_checkboxes);
+
+	// 生成 ISO 不写 U 盘。开始按钮只在 Windows 10 / 11 安装镜像时可用。
+	if (IS_ISO_OUTPUT()) {
+		BOOL can_edit = !op_in_progress;
+		BOOL supported = (image_path != NULL) && IS_WIN10_OR_11_INSTALL(img_report);
+		SetWindowTextU(GetDlgItem(hMainDialog, IDC_ISO_PATH), (image_path != NULL) ? image_path : "");
+		EnableWindow(GetDlgItem(hMainDialog, IDC_ISO_BROWSE), can_edit);
+		EnableWindow(GetDlgItem(hMainDialog, IDC_ISO_PATH), can_edit);
+		EnableWindow(hStart, can_edit && supported);
+		ShowWindow(GetDlgItem(hMainDialog, IDC_ISO_HINT), (can_edit && (image_path != NULL) && !supported) ? SW_SHOW : SW_HIDE);
+		return;
+	}
 
 	// Finally, only enable the half-size dropdowns if we aren't dealing with a pure DD image
 	enable = ((boot_type == BT_IMAGE) && (image_path != NULL) &&
@@ -1331,11 +1355,24 @@ DWORD WINAPI ImageScanThread(LPVOID param)
 	img_report.is_bootable_img = IsBootableImage(image_path);
 	if (img_report.wininst_index > 0 || img_report.is_windows_img)
 		PopulateWindowsVersion();
-	ComboBox_ResetContent(hImageOption);
-	imop_win_sel = 0;
+	// 生成 ISO 页扫描时不要改写 U 盘页的镜像选项。
+	if (!iso_create_mode) {
+		ComboBox_ResetContent(hImageOption);
+		imop_win_sel = 0;
+	}
 
 	if ((ErrorStatus == RUFUS_ERROR(ERROR_CANCELLED)) || (img_report.image_size == 0) ||
 		(!img_report.is_iso && (img_report.is_bootable_img <= 0) && !img_report.is_windows_img)) {
+		// 生成 ISO 页保留已选文件，用红色提示说明它不是 Windows 10 / 11 安装镜像。
+		if (iso_create_mode) {
+			if (ErrorStatus == RUFUS_ERROR(ERROR_CANCELLED))
+				safe_free(image_path);
+			SendMessage(hMainDialog, UM_PROGRESS_EXIT, 0, 0);
+			EnableControls(TRUE, FALSE);
+			RedrawWindow(hMainDialog, NULL, NULL, RDW_ALLCHILDREN | RDW_UPDATENOW);
+			InvalidateRect(hMainDialog, NULL, TRUE);
+			goto out;
+		}
 		// Failed to scan image
 		if (img_report.is_bootable_img < 0)
 			Notification(MB_OK | MB_ICONERROR, lmprintf(MSG_042), lmprintf(MSG_322, image_path));
@@ -1437,7 +1474,17 @@ DWORD WINAPI ImageScanThread(LPVOID param)
 		}
 		selection_default = BT_IMAGE;
 	}
-	if (!IS_DD_BOOTABLE(img_report) && !IS_BIOS_BOOTABLE(img_report) && !IS_EFI_BOOTABLE(img_report)) {
+	if (iso_create_mode) {
+		if (image_path != NULL) {
+			for (i = (int)safe_strlen(image_path); (i > 0) && (image_path[i] != '\\'); i--);
+			if (i != 0)
+				i++;
+			short_image_path = &image_path[i];
+			PrintStatus(0, MSG_205, short_image_path);
+			uprintf("Using image: %s (%s)", short_image_path, SizeToHumanReadable(img_report.image_size, FALSE, FALSE));
+		}
+		EnableControls(TRUE, FALSE);
+	} else if (!IS_DD_BOOTABLE(img_report) && !IS_BIOS_BOOTABLE(img_report) && !IS_EFI_BOOTABLE(img_report)) {
 		// No boot method that we support
 		PrintInfo(0, MSG_081);
 		safe_free(image_path);
@@ -1694,72 +1741,8 @@ static DWORD WINAPI BootCheckThread(LPVOID param)
 			if (img_report.has_panther_unattend) {
 				uprintf("NOTICE: A '/sources/$OEM$/$$/Panther/unattend.xml' was detected on the ISO.");
 				uprintf("As a result, the 'Windows User Experience dialog' will not be displayed.");
-			} else {
-				int arch = _log2(img_report.has_efi >> 1);
-				uint16_t map[16] = { 0 }, b = 1;
-				StrArrayCreate(&selection.choices, 16);
-				StrArrayCreate(&selection.tooltips, 16);
-				if (IS_WINDOWS_11(img_report)) {
-					StrArrayAdd(&selection.choices, lmprintf(MSG_329), TRUE);
-					StrArrayAdd(&selection.tooltips, lmprintf(MSG_360), TRUE);
-					MAP_BIT(UNATTEND_SECUREBOOT_TPM_MINRAM);
-				}
-				if (img_report.win_version.build >= 22500) {
-					StrArrayAdd(&selection.choices, lmprintf(MSG_330), TRUE);
-					StrArrayAdd(&selection.tooltips, lmprintf(MSG_361), TRUE);
-					MAP_BIT(UNATTEND_NO_ONLINE_ACCOUNT);
-				}
-				StrArrayAdd(&selection.choices, lmprintf(MSG_333), TRUE);
-				StrArrayAdd(&selection.tooltips, lmprintf(MSG_364), TRUE);
-				selection.username_index = _log2(b) + 1;
-				MAP_BIT(UNATTEND_SET_USER);
-				StrArrayAdd(&selection.choices, lmprintf(MSG_334), TRUE);
-				StrArrayAdd(&selection.tooltips, lmprintf(MSG_365), TRUE);
-				selection.regional_index = _log2(b) + 1;
-				MAP_BIT(UNATTEND_DUPLICATE_LOCALE);
-				StrArrayAdd(&selection.choices, lmprintf(MSG_331), TRUE);
-				StrArrayAdd(&selection.tooltips, lmprintf(MSG_362), TRUE);
-				selection.privacy_index = _log2(b) + 1;
-				MAP_BIT(UNATTEND_NO_DATA_COLLECTION);
-				if (IS_WINDOWS_11(img_report)) {
-					StrArrayAdd(&selection.choices, lmprintf(MSG_355), TRUE);
-					StrArrayAdd(&selection.tooltips, lmprintf(MSG_371), TRUE);
-					selection.edition_index = _log2(b) + 1;
-					MAP_BIT(UNATTEND_SILENT_INSTALL);
-					StrArrayAdd(&selection.choices, lmprintf(MSG_335), TRUE);
-					StrArrayAdd(&selection.tooltips, lmprintf(MSG_366), TRUE);
-					MAP_BIT(UNATTEND_DISABLE_BITLOCKER);
-					StrArrayAdd(&selection.choices, lmprintf(MSG_324), TRUE);
-					StrArrayAdd(&selection.tooltips, lmprintf(MSG_370), TRUE);
-					MAP_BIT(UNATTEND_QOL_ENHANCEMENTS);
-					if (img_report.win_version.build >= 26200) {
-						StrArrayAdd(&selection.choices, lmprintf(MSG_350), TRUE);
-						StrArrayAdd(&selection.tooltips, lmprintf(MSG_368), TRUE);
-						MAP_BIT(UNATTEND_USE_MS2023_BOOTLOADERS);
-						StrArrayAdd(&selection.choices, lmprintf(MSG_323), TRUE);
-						StrArrayAdd(&selection.tooltips, lmprintf(MSG_369), TRUE);
-						MAP_BIT(UNATTEND_APPLY_SKUSIPOLICY);
-					}
-				}
-				if (expert_mode) {
-					StrArrayAdd(&selection.choices, lmprintf(MSG_346), TRUE);
-					StrArrayAdd(&selection.tooltips, lmprintf(MSG_367), TRUE);
-					MAP_BIT(UNATTEND_FORCE_S_MODE);
-				}
-				selection.mask = remap16(unattend_xml_mask, map, FALSE);
-				selection.style = BS_AUTOCHECKBOX;
-				i = SelectionDialog(lmprintf(MSG_327), lmprintf(MSG_328), &selection);
-				StrArrayDestroy(&selection.choices);
-				StrArrayDestroy(&selection.tooltips);
-				if (i < 0)
-					goto out;
-				i = remap16(i, map, TRUE);
-				append_silent = (i & UNATTEND_SILENT_INSTALL);
-				unattend_xml_path = CreateUnattendXml(arch, i);
-				// Remember the user preferences for the current session.
-				unattend_xml_mask &= ~(remap16(UNATTEND_FULL_MASK, map, TRUE));
-				unattend_xml_mask |= i;
-				WriteSetting32(SETTING_WUE_OPTIONS, (UNATTEND_DEFAULT_MASK << 16) | unattend_xml_mask);
+			} else if (!PromptForWindowsCustomization()) {
+				goto out;
 			}
 		}
 
@@ -2274,11 +2257,35 @@ static void InitDialog(HWND hDlg)
 	CheckDlgButton(hMainDialog, IDC_LIST_USB_HDD, enable_HDDs ? BST_CHECKED : BST_UNCHECKED);
 
 	PrintInfo(0, MSG_210);
+	CreateIsoModeUi(hDlg);
 }
 
 static void PrintStatusTimeout(const char* str, BOOL val)
 {
 	PrintStatus(STATUS_MSG_TIMEOUT, (val)?MSG_250:MSG_251, str);
+}
+
+static char* inactive_image_path = NULL;
+static RUFUS_IMG_REPORT inactive_img_report;
+
+// 两个标签页各记一份镜像，切换时对调，避免生成 ISO 的选择改掉写入 U 盘的选择。
+static void SwapInactiveImage(void)
+{
+	char* path = inactive_image_path;
+	RUFUS_IMG_REPORT report = inactive_img_report;
+	int i;
+
+	inactive_image_path = image_path;
+	inactive_img_report = img_report;
+	image_path = path;
+	img_report = report;
+	short_image_path = NULL;
+	if (image_path == NULL)
+		return;
+	for (i = (int)safe_strlen(image_path); (i > 0) && (image_path[i] != '\\'); i--);
+	if (i != 0)
+		i++;
+	short_image_path = &image_path[i];
 }
 
 /*
@@ -2617,6 +2624,25 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 			target_type = (int)ComboBox_GetCurItemData(hPartitionScheme);
 			partition_type = (int)ComboBox_GetCurItemData(hTargetSystem);
 			return (INT_PTR)TRUE;
+		case IDC_ISO_BROWSE:
+			if (format_thread != NULL)
+				break;
+			{
+				char* old_image_path = image_path;
+				EXT_DECL(iso_ext, NULL, __VA_GROUP__("*.iso"), __VA_GROUP__(lmprintf(MSG_036)));
+				image_path = FileDialog(FALSE, NULL, &iso_ext, NULL);
+				if (image_path == NULL) {
+					image_path = old_image_path;
+					break;
+				}
+				free(old_image_path);
+				if (CreateThread(NULL, 0, ImageScanThread, NULL, 0, NULL) == NULL) {
+					uprintf("Unable to start ISO scanning thread");
+					ErrorStatus = RUFUS_ERROR(APPERR(ERROR_CANT_START_THREAD));
+					EnableControls(TRUE, FALSE);
+				}
+			}
+			break;
 		case IDC_SELECT:
 			// Ctrl-SELECT is used to select an additional archive of files to extract
 			// For now only zip archives are supported.
@@ -2698,6 +2724,16 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 			no_confirmation_on_cancel = FALSE;
 			SendMessage(hMainDialog, UM_PROGRESS_INIT, 0, 0);
 			selection_default = (int)ComboBox_GetCurItemData(hBootType);
+			// When creating a new ISO image, there is no target drive to validate or write to, so
+			// we can skip the whole boot check and go straight to creating the modified image.
+			if (IS_ISO_OUTPUT()) {
+				if (!CreateModifiedISO()) {
+					if (!IS_ERROR(ErrorStatus))
+						ErrorStatus = RUFUS_ERROR(APPERR(ERROR_CANT_START_THREAD));
+					PostMessage(hMainDialog, UM_FORMAT_COMPLETED, (WPARAM)FALSE, 0);
+				}
+				break;
+			}
 			// Create a thread to validate options and download files as needed (so that we can update the UI).
 			// On exit, this thread sends message UM_FORMAT_START back to this dialog.
 			if (CreateThread(NULL, 0, BootCheckThread, NULL, 0, NULL) == NULL) {
@@ -2901,6 +2937,17 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 		return (INT_PTR)FALSE;
 
 	case WM_DRAWITEM:
+		pDI = (DRAWITEMSTRUCT*)lParam;
+		if ((pDI != NULL) && (pDI->CtlID == IDC_ISO_HINT)) {
+			HBRUSH bg;
+			bg = CreateSolidBrush(is_darkmode_enabled ? DARKMODE_NORMAL_DIALOG_BACKGROUND_COLOR : GetSysColor(COLOR_BTNFACE));
+			FillRect(pDI->hDC, &pDI->rcItem, bg);
+			DeleteObject(bg);
+			SetBkMode(pDI->hDC, TRANSPARENT);
+			SetTextColor(pDI->hDC, RGB(0xC0, 0x20, 0x20));
+			DrawTextExU(pDI->hDC, lmprintf(MSG_377), -1, &pDI->rcItem, DT_LEFT | DT_WORDBREAK, NULL);
+			return (INT_PTR)TRUE;
+		}
 		// The things one must do to get an ellipsis and text alignment on the status bar...
 		if (wParam == IDC_STATUS) {
 			pDI = (DRAWITEMSTRUCT*)lParam;
@@ -2955,6 +3002,22 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 		break;
 
 	case WM_NOTIFY:
+		if ((((LPNMHDR)lParam)->idFrom == IDC_MODE_TAB) && (((LPNMHDR)lParam)->code == TCN_SELCHANGE)) {
+			int page = TabCtrl_GetCurSel(GetDlgItem(hDlg, IDC_MODE_TAB));
+			BOOL iso = (page == 1);
+			if (op_in_progress) {
+				TabCtrl_SetCurSel(GetDlgItem(hDlg, IDC_MODE_TAB), iso_create_mode ? 1 : 0);
+				return (INT_PTR)TRUE;
+			}
+			if (iso != iso_create_mode) {
+				SwapInactiveImage();
+				iso_create_mode = iso;
+				ApplyIsoPageVisibility(iso);
+				EnableControls(TRUE, FALSE);
+				InvalidateRect(hDlg, NULL, TRUE);
+			}
+			return (INT_PTR)TRUE;
+		}
 		switch (((LPNMHDR)lParam)->code) {
 		case TTN_GETDISPINFO:
 			lpttt = (LPTOOLTIPTEXT)lParam;
@@ -3021,10 +3084,18 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 				safe_free(wbuffer);
 
 				if (image_path != NULL) {
+				if (iso_create_mode) {
+					if (CreateThread(NULL, 0, ImageScanThread, NULL, 0, NULL) == NULL) {
+						uprintf("Unable to start ISO scanning thread");
+						ErrorStatus = RUFUS_ERROR(APPERR(ERROR_CANT_START_THREAD));
+						EnableControls(TRUE, FALSE);
+					}
+				} else {
 					img_provided = TRUE;
 					// Simulate image selection click
 					SendMessage(hDlg, WM_COMMAND, IDC_SELECT, 0);
-				} else {
+				}
+			} else {
 					EnableControls(TRUE, FALSE);
 				}
 		}

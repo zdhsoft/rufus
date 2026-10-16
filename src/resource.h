@@ -587,6 +587,11 @@
 #define MSG_372                         3372
 #define MSG_373                         3373
 #define MSG_374                         3374
+#define IDC_MODE_TAB                    1200
+#define IDC_ISO_PATH                    1201
+#define IDC_ISO_BROWSE                  1202
+#define IDC_ISO_HINT                    1203
+#define IDC_ISO_FILE_TXT                1204
 #define MSG_375                         3375
 #define MSG_376                         3376
 #define MSG_377                         3377

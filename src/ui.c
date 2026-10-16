@@ -30,6 +30,7 @@
 #include <string.h>
 #include <oleacc.h>
 #include <winioctl.h>
+#include <commctrl.h>
 #include <assert.h>
 
 #include "rufus.h"
@@ -1608,10 +1609,129 @@ void OnPaint(HDC hdc)
 	COLORREF cp = is_darkmode_enabled ? DARKMODE_NORMAL_CONTROL_EDGE_COLOR : GetSysColor(COLOR_WINDOWTEXT);
 	HPEN hp = CreatePen(0, (fScale < 1.5f) ? 2 : 3, cp);
 	HPEN hop = (HPEN)SelectObject(hdc, hp);
-	for (i = 0; i < ARRAYSIZE(section_vpos); i++) {
+	for (i = 1; i < ARRAYSIZE(section_vpos); i++) {
 		MoveToEx(hdc, mw + 10, section_vpos[i], NULL);
 		LineTo(hdc, mw + fw, section_vpos[i]);
 	}
 	SelectObject(hdc, hop);
 	DeleteObject(hp);
+}
+
+// 写入 U 盘页上、生成 ISO 时要让开的控件。状态栏、进度和开始按钮保留。
+static int usb_page_ids[] = {
+	IDS_DEVICE_TXT, IDC_DEVICE, IDC_SAVE_TOOLBAR,
+	IDS_BOOT_SELECTION_TXT, IDC_BOOT_SELECTION, IDC_HASH_TOOLBAR, IDC_SELECT,
+	IDS_IMAGE_OPTION_TXT, IDC_IMAGE_OPTION, IDC_PERSISTENCE_SLIDER, IDC_PERSISTENCE_SIZE, IDC_PERSISTENCE_UNITS,
+	IDS_PARTITION_TYPE_TXT, IDC_PARTITION_TYPE, IDS_TARGET_SYSTEM_TXT, IDC_TARGET_SYSTEM, IDS_CSM_HELP_TXT,
+	IDC_ADVANCED_DEVICE_TOOLBAR, IDC_LIST_USB_HDD, IDC_OLD_BIOS_FIXES, IDC_UEFI_MEDIA_VALIDATION,
+	IDS_FORMAT_OPTIONS_TXT, IDS_LABEL_TXT, IDC_LABEL,
+	IDS_FILE_SYSTEM_TXT, IDC_FILE_SYSTEM, IDS_CLUSTER_SIZE_TXT, IDC_CLUSTER_SIZE,
+	IDC_ADVANCED_FORMAT_TOOLBAR, IDC_QUICK_FORMAT, IDC_BAD_BLOCKS, IDC_NB_PASSES, IDC_EXTENDED_LABEL,
+};
+
+static int iso_page_ids[] = {
+	IDC_ISO_FILE_TXT, IDC_ISO_PATH, IDC_ISO_BROWSE, IDC_ISO_HINT,
+};
+
+static int usb_page_visible[ARRAYSIZE(usb_page_ids)];
+
+// 在现有界面上方加上标签，并创建生成 ISO 页的控件。调用时主界面坐标已经排好。
+void CreateIsoModeUi(HWND hDlg)
+{
+	RECT rc, dlg;
+	HWND child, next, hCtrl;
+	HFONT hFont;
+	TCITEMW item;
+	wchar_t* text;
+	int i, dy;
+	char button_text[128];
+
+	dy = ddh + 8;
+	child = GetWindow(hDlg, GW_CHILD);
+	while (child != NULL) {
+		next = GetWindow(child, GW_HWNDNEXT);
+		GetWindowRect(child, &rc);
+		MapWindowPoints(NULL, hDlg, (POINT*)&rc, 2);
+		SetWindowPos(child, NULL, rc.left, rc.top + dy, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+		child = next;
+	}
+	for (i = 0; i < ARRAYSIZE(section_vpos); i++)
+		section_vpos[i] += dy;
+	GetWindowRect(hDlg, &dlg);
+	SetWindowPos(hDlg, NULL, 0, 0, dlg.right - dlg.left, dlg.bottom - dlg.top + dy, SWP_NOMOVE | SWP_NOZORDER);
+
+	hFont = (HFONT)SendMessage(hDlg, WM_GETFONT, 0, 0);
+	hCtrl = CreateWindowExW(0, WC_TABCONTROLW, L"",
+		WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP,
+		mw, 2, fw, dy - 4, hDlg, (HMENU)IDC_MODE_TAB, hMainInstance, NULL);
+	SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
+	item.mask = TCIF_TEXT;
+	text = utf8_to_wchar(lmprintf(MSG_375));
+	item.pszText = (text != NULL) ? text : L"";
+	SendMessageW(hCtrl, TCM_INSERTITEMW, 0, (LPARAM)&item);
+	free(text);
+	text = utf8_to_wchar(lmprintf(MSG_376));
+	item.pszText = (text != NULL) ? text : L"";
+	SendMessageW(hCtrl, TCM_INSERTITEMW, 1, (LPARAM)&item);
+	free(text);
+
+	ShowWindow(GetDlgItem(hDlg, IDS_DRIVE_PROPERTIES_TXT), SW_HIDE);
+
+	GetWindowRect(GetDlgItem(hDlg, IDS_DEVICE_TXT), &rc);
+	MapWindowPoints(NULL, hDlg, (POINT*)&rc, 2);
+	hCtrl = CreateWindowExW(0, WC_STATICW, L"", WS_CHILD,
+		rc.left, rc.top, fw, rc.bottom - rc.top, hDlg, (HMENU)IDC_ISO_FILE_TXT, hMainInstance, NULL);
+	SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
+	SetWindowTextU(hCtrl, lmprintf(MSG_378));
+
+	GetWindowRect(GetDlgItem(hDlg, IDC_DEVICE), &rc);
+	MapWindowPoints(NULL, hDlg, (POINT*)&rc, 2);
+	hCtrl = CreateWindowExW(WS_EX_CLIENTEDGE, WC_EDITW, L"",
+		WS_CHILD | ES_AUTOHSCROLL | ES_READONLY | WS_TABSTOP,
+		rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top,
+		hDlg, (HMENU)IDC_ISO_PATH, hMainInstance, NULL);
+	SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
+
+	GetWindowRect(GetDlgItem(hDlg, IDC_SELECT), &rc);
+	MapWindowPoints(NULL, hDlg, (POINT*)&rc, 2);
+	hCtrl = CreateWindowExW(0, WC_BUTTONW, L"", WS_CHILD | WS_TABSTOP,
+		rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top,
+		hDlg, (HMENU)IDC_ISO_BROWSE, hMainInstance, NULL);
+	SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
+	button_text[0] = 0;
+	GetWindowTextU(GetDlgItem(hDlg, IDC_SELECT), button_text, sizeof(button_text));
+	SetWindowTextU(hCtrl, button_text);
+
+	GetWindowRect(GetDlgItem(hDlg, IDC_ISO_PATH), &rc);
+	MapWindowPoints(NULL, hDlg, (POINT*)&rc, 2);
+	hCtrl = CreateWindowExW(0, WC_STATICW, L"", WS_CHILD | SS_OWNERDRAW,
+		mw, rc.bottom + 8, fw, ddh * 2, hDlg, (HMENU)IDC_ISO_HINT, hMainInstance, NULL);
+	SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
+
+	for (i = 0; i < ARRAYSIZE(iso_page_ids); i++)
+		ShowWindow(GetDlgItem(hDlg, iso_page_ids[i]), SW_HIDE);
+}
+
+// 切换两个标签页各自的控件。写入 U 盘页里原本隐藏的高级选项，切回去时仍保持隐藏。
+void ApplyIsoPageVisibility(BOOL iso)
+{
+	int i;
+
+	if (iso) {
+		for (i = 0; i < ARRAYSIZE(usb_page_ids); i++) {
+			HWND hCtrl = GetDlgItem(hMainDialog, usb_page_ids[i]);
+			usb_page_visible[i] = (hCtrl != NULL) && IsWindowVisible(hCtrl);
+			ShowWindow(hCtrl, SW_HIDE);
+		}
+		for (i = 0; i < ARRAYSIZE(iso_page_ids); i++) {
+			if (iso_page_ids[i] == IDC_ISO_HINT)
+				continue;
+			ShowWindow(GetDlgItem(hMainDialog, iso_page_ids[i]), SW_SHOW);
+		}
+	} else {
+		for (i = 0; i < ARRAYSIZE(iso_page_ids); i++)
+			ShowWindow(GetDlgItem(hMainDialog, iso_page_ids[i]), SW_HIDE);
+		for (i = 0; i < ARRAYSIZE(usb_page_ids); i++)
+			ShowWindow(GetDlgItem(hMainDialog, usb_page_ids[i]), usb_page_visible[i] ? SW_SHOW : SW_HIDE);
+	}
 }

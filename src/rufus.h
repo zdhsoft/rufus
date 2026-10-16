@@ -173,6 +173,8 @@
 
 #define ComboBox_GetCurItemData(hCtrl) ComboBox_GetItemData(hCtrl, ComboBox_GetCurSel(hCtrl))
 
+#define IS_ISO_OUTPUT()             (iso_create_mode)
+
 #define safe_free(p) do { free((void*)p); p = NULL; } while(0)
 #define safe_mm_free(p) do { _mm_free((void*)p); p = NULL; } while(0)
 static __inline void safe_strcp(char* dst, const size_t dst_max, const char* src, const size_t count) {
@@ -390,6 +392,8 @@ enum EFI_BOOT_TYPE {
 #define IS_EFI_BOOTABLE(r)  (r.has_efi != 0)
 #define IS_BIOS_BOOTABLE(r) (HAS_BOOTMGR(r) || HAS_SYSLINUX(r) || HAS_WINPE(r) || HAS_GRUB(r) || HAS_REACTOS(r) || HAS_KOLIBRIOS(r))
 #define HAS_WINTOGO(r)      (HAS_BOOTMGR(r) && IS_EFI_BOOTABLE(r) && HAS_WININST(r))
+#define HAS_ISO_OUTPUT(r)   ((r).is_iso && HAS_WINDOWS(r) && !IS_DD_ONLY(r))
+#define IS_WIN10_OR_11_INSTALL(r) (HAS_ISO_OUTPUT(r) && HAS_WININST(r) && IS_WINDOWS_1X(r))
 #define HAS_PERSISTENCE(r)  ((HAS_SYSLINUX(r) || HAS_GRUB(r)) && !(HAS_WINDOWS(r) || HAS_REACTOS(r) || HAS_KOLIBRIOS(r)))
 #define IS_FAT(fs)          ((fs == FS_FAT16) || (fs == FS_FAT32))
 #define IS_EXT(fs)          ((fs >= FS_EXT2) && (fs <= FS_EXT4))
@@ -773,6 +777,7 @@ extern DWORD ErrorStatus, DownloadStatus, MainThreadId, LastWriteError;
 extern BOOL use_own_c32[NB_OLD_C32], detect_fakes, op_in_progress, right_to_left_mode;
 extern BOOL allow_dual_uefi_bios, large_drive, usb_debug;
 extern uint8_t image_options, *pe256ssp;
+extern BOOL iso_create_mode;
 extern uint16_t rufus_version[3], embedded_sl_version[2];
 extern uint32_t pe256ssp_size;
 extern uint64_t persistence_size;

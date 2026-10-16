@@ -116,3 +116,5 @@ extern void ShowLanguageMenu(RECT rcExclude);
 extern void SetPassesTooltip(void);
 extern void SetBootTypeDropdownWidth(void);
 extern void OnPaint(HDC hdc);
+extern void CreateIsoModeUi(HWND hDlg);
+extern void ApplyIsoPageVisibility(BOOL iso);

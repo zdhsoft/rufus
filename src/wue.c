@@ -35,6 +35,7 @@
 #include "msapi_utf8.h"
 #include "timezoneapi.h"
 #include "localization.h"
+#include "settings.h"
 
  /* Memory leaks detection - define _CRTDBG_MAP_ALLOC as preprocessor macro */
 #ifdef _CRTDBG_MAP_ALLOC
@@ -50,7 +51,7 @@ int unattend_edition_index = 1;
 char *unattend_xml_path = NULL, unattend_username[MAX_USERNAME_LENGTH];
 uint32_t removable_section[2] = { 0, 0 };
 
-extern BOOL validate_md5sum, bcdboot_supports_ex;
+extern BOOL validate_md5sum, bcdboot_supports_ex, expert_mode, append_silent;
 extern uint64_t md5sum_totalbytes;
 extern StrArray modified_files;
 extern const char* efi_archname[ARCH_MAX];
@@ -845,6 +846,101 @@ out:
 }
 
 /// <summary>
+/// Asks the user how the Windows installation should be customized and generates the
+/// corresponding unattend.xml. This is shared between writing to a USB drive and creating
+/// a modified ISO image, as both apply the exact same customizations.
+/// </summary>
+/// <returns>TRUE if there is nothing to customize or the user made a choice, FALSE if the user cancelled.</returns>
+BOOL PromptForWindowsCustomization(void)
+{
+	uint16_t map[16] = { 0 }, b = 1;
+	int i, arch;
+	selection_dialog_options_t selection = { 0 };
+
+	// These are set as a side effect of the dialog below (and of CreateUnattendXml()) and are
+	// read by callers, so they must be reset here rather than relied upon to have been reset
+	// by BootCheckThread(), since this function is now also called by the ISO creation path.
+	unattend_xml_flags = 0;
+	append_silent = FALSE;
+
+	if (!((WindowsVersion.Version >= WINDOWS_8) && IS_WINDOWS_1X(img_report)))
+		return TRUE;
+
+	if (img_report.has_panther_unattend) {
+		uprintf("NOTICE: A '/sources/$OEM$/$$/Panther/unattend.xml' was detected on the ISO.");
+		uprintf("As a result, the 'Windows User Experience dialog' will not be displayed.");
+		return TRUE;
+	}
+
+	arch = _log2(img_report.has_efi >> 1);
+	StrArrayCreate(&selection.choices, 16);
+	StrArrayCreate(&selection.tooltips, 16);
+	if (IS_WINDOWS_11(img_report)) {
+		StrArrayAdd(&selection.choices, lmprintf(MSG_329), TRUE);
+		StrArrayAdd(&selection.tooltips, lmprintf(MSG_360), TRUE);
+		MAP_BIT(UNATTEND_SECUREBOOT_TPM_MINRAM);
+	}
+	if (img_report.win_version.build >= 22500) {
+		StrArrayAdd(&selection.choices, lmprintf(MSG_330), TRUE);
+		StrArrayAdd(&selection.tooltips, lmprintf(MSG_361), TRUE);
+		MAP_BIT(UNATTEND_NO_ONLINE_ACCOUNT);
+	}
+	StrArrayAdd(&selection.choices, lmprintf(MSG_333), TRUE);
+	StrArrayAdd(&selection.tooltips, lmprintf(MSG_364), TRUE);
+	selection.username_index = _log2(b) + 1;
+	MAP_BIT(UNATTEND_SET_USER);
+	StrArrayAdd(&selection.choices, lmprintf(MSG_334), TRUE);
+	StrArrayAdd(&selection.tooltips, lmprintf(MSG_365), TRUE);
+	selection.regional_index = _log2(b) + 1;
+	MAP_BIT(UNATTEND_DUPLICATE_LOCALE);
+	StrArrayAdd(&selection.choices, lmprintf(MSG_331), TRUE);
+	StrArrayAdd(&selection.tooltips, lmprintf(MSG_362), TRUE);
+	selection.privacy_index = _log2(b) + 1;
+	MAP_BIT(UNATTEND_NO_DATA_COLLECTION);
+	if (IS_WINDOWS_11(img_report)) {
+		StrArrayAdd(&selection.choices, lmprintf(MSG_355), TRUE);
+		StrArrayAdd(&selection.tooltips, lmprintf(MSG_371), TRUE);
+		selection.edition_index = _log2(b) + 1;
+		MAP_BIT(UNATTEND_SILENT_INSTALL);
+		StrArrayAdd(&selection.choices, lmprintf(MSG_335), TRUE);
+		StrArrayAdd(&selection.tooltips, lmprintf(MSG_366), TRUE);
+		MAP_BIT(UNATTEND_DISABLE_BITLOCKER);
+		StrArrayAdd(&selection.choices, lmprintf(MSG_324), TRUE);
+		StrArrayAdd(&selection.tooltips, lmprintf(MSG_370), TRUE);
+		MAP_BIT(UNATTEND_QOL_ENHANCEMENTS);
+		if (img_report.win_version.build >= 26200) {
+			StrArrayAdd(&selection.choices, lmprintf(MSG_350), TRUE);
+			StrArrayAdd(&selection.tooltips, lmprintf(MSG_368), TRUE);
+			MAP_BIT(UNATTEND_USE_MS2023_BOOTLOADERS);
+			StrArrayAdd(&selection.choices, lmprintf(MSG_323), TRUE);
+			StrArrayAdd(&selection.tooltips, lmprintf(MSG_369), TRUE);
+			MAP_BIT(UNATTEND_APPLY_SKUSIPOLICY);
+		}
+	}
+	if (expert_mode) {
+		StrArrayAdd(&selection.choices, lmprintf(MSG_346), TRUE);
+		StrArrayAdd(&selection.tooltips, lmprintf(MSG_367), TRUE);
+		MAP_BIT(UNATTEND_FORCE_S_MODE);
+	}
+	selection.mask = remap16(unattend_xml_mask, map, FALSE);
+	selection.style = BS_AUTOCHECKBOX;
+	i = SelectionDialog(lmprintf(MSG_327), lmprintf(MSG_328), &selection);
+	StrArrayDestroy(&selection.choices);
+	StrArrayDestroy(&selection.tooltips);
+	if (i < 0)
+		return FALSE;	// The user cancelled
+
+	i = remap16(i, map, TRUE);
+	append_silent = (i & UNATTEND_SILENT_INSTALL);
+	unattend_xml_path = CreateUnattendXml(arch, i);
+	// Remember the user preferences for the current session.
+	unattend_xml_mask &= ~(remap16(UNATTEND_FULL_MASK, map, TRUE));
+	unattend_xml_mask |= i;
+	WriteSetting32(SETTING_WUE_OPTIONS, (UNATTEND_DEFAULT_MASK << 16) | unattend_xml_mask);
+	return TRUE;
+}
+
+/// <summary>
 /// Checks which versions of Windows are available in an install image
 /// to set our extraction index. Asks the user to select one if needed.
 /// </summary>
@@ -1111,10 +1207,10 @@ BOOL SetupWinToGo(DWORD DriveIndex, const char* drive_name, BOOL use_esp)
 /// <summary>
 /// Add unattend.xml to 'sources\boot.wim' (install) or 'Windows\Panther\' (Windows To Go).
 /// </summary>
-/// <param name="drive_letter">The letter of the drive where the \sources\boot.wim image resides.</param>
+/// <param name="root">'X:', 'X:\' or the path of an extracted image. A trailing separator is added if needed.</param>
 /// <param name="flags">A bitmap of unattend flags to apply.</param>
 /// <returns>TRUE on success, FALSE on error.</returns>
-BOOL ApplyWindowsCustomization(char drive_letter, int flags)
+BOOL ApplyWindowsCustomization(const char* root, int flags)
 // NB: Work with a copy of unattend_xml_flags as a parameter since we will modify it.
 {
 	BOOL r = FALSE, is_hive_mounted = FALSE, update_boot_wim = FALSE;
@@ -1123,14 +1219,14 @@ BOOL ApplyWindowsCustomization(char drive_letter, int flags)
 	const char* reg_path = "Windows\\System32\\config\\SYSTEM";
 	const char* efi_ex_path = "Windows\\Boot\\EFI_EX";
 	const char* fonts_ex_path = "Windows\\Boot\\Fonts_EX";
-	char boot_wim_path[] = "?:\\sources\\boot.wim", key_path[64];
+	char prefix[4 * MAX_PATH], boot_wim_path[4 * MAX_PATH], key_path[64];
 	char tmp_path[2][MAX_PATH] = { "", "" };
-	char appraiserres_dll_src[] = "?:\\sources\\appraiserres.dll";
-	char appraiserres_dll_dst[] = "?:\\sources\\appraiserres.bak";
-	char setup_exe[] = "?:\\setup.exe";
-	char setup_dll[] = "?:\\setup.dll";
-	char md5sum_path[] = "?:\\md5sum.txt";
-	char path[MAX_PATH], *rep, *tmp_dir_end;
+	char appraiserres_dll_src[4 * MAX_PATH];
+	char appraiserres_dll_dst[4 * MAX_PATH];
+	char setup_exe[4 * MAX_PATH];
+	char setup_dll[4 * MAX_PATH];
+	char md5sum_path[4 * MAX_PATH];
+	char path[4 * MAX_PATH], *rep, *tmp_dir_end;
 	uint8_t* buf = NULL;
 	uint16_t setup_arch;
 	uint32_t len;
@@ -1141,29 +1237,41 @@ BOOL ApplyWindowsCustomization(char drive_letter, int flags)
 	WIMStruct* wim = NULL;
 	struct wimlib_update_command wuc[2] = { 0 };
 
+	if_assert_fails(root != NULL)
+		return FALSE;
+
+	// 'prefix' always ends with a path separator. A bare drive letter such as 'D:' must not be
+	// turned into a relative path, so it gets one appended rather than simply concatenated.
+	if ((root[0] != 0) && (root[1] == ':') && (root[2] == 0))
+		static_sprintf(prefix, "%s\\", root);
+	else if ((root[0] != 0) && (root[safe_strlen(root) - 1] == '\\'))
+		static_sprintf(prefix, "%s", root);
+	else
+		static_sprintf(prefix, "%s\\", root);
+
 	assert(unattend_xml_path != NULL);
 	uprintf("Applying Windows customization:");
 	PrintStatus(0, MSG_326);
 	if (flags & UNATTEND_WINDOWS_TO_GO) {
-		static_sprintf(path, "%c:\\Windows\\Panther", drive_letter);
+		static_sprintf(path, "%sWindows\\Panther", prefix);
 		if (!CreateDirectoryA(path, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) {
 			uprintf("Could not create '%s' : %s", path, WindowsErrorString());
 			goto out;
 		}
-		static_sprintf(path, "%c:\\Windows\\Panther\\unattend.xml", drive_letter);
+		static_sprintf(path, "%sWindows\\Panther\\unattend.xml", prefix);
 		if (!CopyFileA(unattend_xml_path, path, TRUE)) {
 			uprintf("Could not create '%s' : %s", path, WindowsErrorString());
 			goto out;
 		}
 		uprintf("Added '%s'", path);
 	} else {
-		boot_wim_path[0] = drive_letter;
+		static_sprintf(boot_wim_path, "%ssources\\boot.wim", prefix);
 		if (flags & UNATTEND_WINPE_SETUP_MASK) {
 			// Create a backup of sources\appraiserres.dll and then create an empty file to
 			// allow in-place upgrades without TPM/SB. Note that we need to create an empty,
 			// appraiserres.dll otherwise setup.exe extracts its own.
-			appraiserres_dll_src[0] = drive_letter;
-			appraiserres_dll_dst[0] = drive_letter;
+			static_sprintf(appraiserres_dll_src, "%ssources\\appraiserres.dll", prefix);
+			static_sprintf(appraiserres_dll_dst, "%ssources\\appraiserres.bak", prefix);
 			if (!MoveFileExU(appraiserres_dll_src, appraiserres_dll_dst, MOVEFILE_REPLACE_EXISTING)
 				&& GetLastError() != ERROR_FILE_NOT_FOUND) {
 				uprintf("Could not rename '%s': %s", appraiserres_dll_src, WindowsErrorString());
@@ -1180,9 +1288,9 @@ BOOL ApplyWindowsCustomization(char drive_letter, int flags)
 			}
 			// Apply the 'setup.exe' wrapper for Windows 11 24H2 in-place upgrades
 			if (img_report.win_version.build >= 26000) {
-				setup_exe[0] = drive_letter;
-				setup_dll[0] = drive_letter;
-				md5sum_path[0] = drive_letter;
+				static_sprintf(setup_exe, "%ssetup.exe", prefix);
+				static_sprintf(setup_dll, "%ssetup.dll", prefix);
+				static_sprintf(md5sum_path, "%smd5sum.txt", prefix);
 				dwSize = read_file(setup_exe, &buf);
 				if (dwSize != 0) {
 					setup_arch = GetPeArch(buf);
@@ -1332,14 +1440,14 @@ BOOL ApplyWindowsCustomization(char drive_letter, int flags)
 			// %WINDIR%\Panther\unattend.xml then (See: https://github.com/pbatard/rufus/issues/1981).
 			// So instead, copy it to \sources\$OEM$\$$\Panther\unattend.xml on the media, as the content
 			// of \sources\$OEM$\$$\* will get copied into %WINDIR%\ during the file copy phase.
-			static_sprintf(path, "%c:\\sources\\$OEM$\\$$\\Panther", drive_letter);
+			static_sprintf(path, "%ssources\\$OEM$\\$$\\Panther", prefix);
 			i = SHCreateDirectoryExA(NULL, path, NULL);
 			if (i != ERROR_SUCCESS) {
 				SetLastError(i);
 				uprintf("Error: Could not create directory '%s': %s", path, WindowsErrorString());
 				goto out;
 			}
-			static_sprintf(path, "%c:\\sources\\$OEM$\\$$\\Panther\\unattend.xml", drive_letter);
+			static_sprintf(path, "%ssources\\$OEM$\\$$\\Panther\\unattend.xml", prefix);
 			if (!CopyFileU(unattend_xml_path, path, TRUE)) {
 				uprintf("Could not create '%s': %s", path, WindowsErrorString());
 				goto out;
@@ -1375,7 +1483,7 @@ BOOL ApplyWindowsCustomization(char drive_letter, int flags)
 			StrArrayCreate(&files, 64);
 			ListDirectoryContent(&files, tmp_path[1], LIST_DIR_TYPE_FILE);
 			for (i = 0; i < (int)files.Index; i++) {
-				static_sprintf(path, "%c:\\efi\\microsoft\\boot%s", drive_letter, &files.String[i][len]);
+				static_sprintf(path, "%sefi\\microsoft\\boot%s", prefix, &files.String[i][len]);
 				rep = remove_substr(path, "_EX");
 				if (!CopyFileU(files.String[i], rep, FALSE))
 					uprintf("WARNING: Could not copy '%s': %s", path, WindowsErrorString());
@@ -1389,7 +1497,7 @@ BOOL ApplyWindowsCustomization(char drive_letter, int flags)
 			for (i = 1; i < ARRAYSIZE(efi_archname); i++) {
 				*tmp_dir_end = '\0';
 				static_strcat(tmp_path[1], "\\EFI_EX\\bootmgfw_EX.efi");
-				static_sprintf(path, "%c:\\efi\\boot\\boot%s.efi", drive_letter, efi_archname[i]);
+				static_sprintf(path, "%sefi\\boot\\boot%s.efi", prefix, efi_archname[i]);
 				if (!PathFileExistsA(path))
 					continue;
 				if (!CopyFileU(tmp_path[1], path, FALSE))
@@ -1402,7 +1510,7 @@ BOOL ApplyWindowsCustomization(char drive_letter, int flags)
 			// Replace /bootmgr.efi
 			*tmp_dir_end = '\0';
 			static_strcat(tmp_path[1], "\\EFI_EX\\bootmgr_EX.efi");
-			static_sprintf(path, "%c:\\bootmgr.efi", drive_letter);
+			static_sprintf(path, "%sbootmgr.efi", prefix);
 			if (!CopyFileU(tmp_path[1], path, FALSE))
 				uprintf("WARNING: Could not replace 'bootmgr.efi': %s", WindowsErrorString());
 			else

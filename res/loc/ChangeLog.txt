@@ -12,6 +12,12 @@ o v?.??
   - *NEW*      MSG_373 "I WILL ensure that I don't leave this media plugged on a PC I do not plan to erase."
   - *NEW*      MSG_374 "I AGREE that any data loss resulting from the use of this option lies entirely with me."
 
+o v?.??
+  - *NEW*      MSG_375 "写入 U 盘"
+  - *NEW*      MSG_376 "生成 ISO"
+  - *NEW*      MSG_377 "只接受 Windows 10 或 Windows 11 安装镜像"
+  - *NEW*      MSG_378 "本地镜像"
+
 o v4.14 (2026.04.30)
   // NB: I used Google translate to update the following message, so please check for accuracy!
   - *UPDATED*  MSG_337 "An additional file ('diskcopy.dll') must be downloaded from Microsoft to install MS-DOS:" -> "An additional file ('%s') must be downloaded from Microsoft to use this feature:"
