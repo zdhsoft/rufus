@@ -1452,16 +1452,33 @@ BOOL GetIsoBootData(const char* src_iso, const char* iso_root, char* bootdata, s
 
 	for (i = 0; i < (int)boot.count; i++) {
 		char disk_path[MAX_PATH];
-		// An entry whose path we could not resolve cannot be handed over to oscdimg
-		if (boot.entry[i].path[0] == 0)
-			continue;
+		const char* win_boot = NULL;
+
 		// Convert the ISO path ('/boot/syslinux/isolinux.bin') into a path we can
 		// reference from the extraction directory we are going to hand over to oscdimg.
-		static_sprintf(disk_path, "%s%s", iso_root, boot.entry[i].path);
-		to_windows_path(disk_path);
-		if (!PathFileExistsU(disk_path)) {
-			uprintf("WARNING: Could not find boot file '%s' - the resulting image may not be bootable", disk_path);
-			continue;
+		disk_path[0] = 0;
+		if (boot.entry[i].path[0] != 0) {
+			static_sprintf(disk_path, "%s%s", iso_root, boot.entry[i].path);
+			to_windows_path(disk_path);
+		}
+		// 官方 Windows 安装镜像的 ISO-9660 目录通常只放 README.TXT，启动文件在 UDF 中。
+		// 这时无法按 El Torito 的 LBA 在 ISO-9660 里解析出路径，改用解包后的已知文件。
+		if ((disk_path[0] == 0) || !PathFileExistsU(disk_path)) {
+			if (boot.entry[i].platform_id == 0xEF)
+				win_boot = "efi\\microsoft\\boot\\efisys.bin";
+			else if (boot.entry[i].platform_id == 0x00)
+				win_boot = "boot\\etfsboot.com";
+			if (win_boot == NULL) {
+				if (disk_path[0] != 0)
+					uprintf("WARNING: Could not find boot file '%s' - the resulting image may not be bootable", disk_path);
+				continue;
+			}
+			static_sprintf(disk_path, "%s\\%s", iso_root, win_boot);
+			if (!PathFileExistsU(disk_path)) {
+				uprintf("WARNING: Could not find boot file '%s'", disk_path);
+				continue;
+			}
+			uprintf("  Using extracted Windows boot file '%s'", disk_path);
 		}
 		static_sprintf(entry_str, "%sp%02X,e,b\"%s\"",
 			(n == 0) ? "" : "#", boot.entry[i].platform_id, disk_path);

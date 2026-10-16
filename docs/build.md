@@ -9,7 +9,13 @@
 - 平台工具集 `v145`
 - MSBuild 18.10：`C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\MSBuild\Current\Bin\MSBuild.exe`
 
-在 `c:\work\github\rufus` 执行：
+在 `c:\work\github\rufus` 执行。`msbuild` 已在 `PATH` 中时，用 cmd：
+
+```bat
+msbuild rufus.sln /p:Configuration=Release /p:Platform=x64 /m /v:minimal
+```
+
+PowerShell 里若找不到该命令，用完整路径：
 
 ```powershell
 & "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\MSBuild\Current\Bin\MSBuild.exe" rufus.sln /p:Configuration=Release /p:Platform=x64 /m /v:minimal
