@@ -426,7 +426,8 @@ BOOL FormatLargeFAT32(DWORD DriveIndex, uint64_t PartitionOffset, DWORD ClusterS
 
 	for (i = 0; i < (SystemAreaSize + BurstSize - 1); i += BurstSize) {
 		if (!(Flags & FP_NO_PROGRESS))
-			UpdateProgressWithInfo(OP_FORMAT, MSG_217, (uint64_t)i, (uint64_t)SystemAreaSize + BurstSize);
+			// 这里 i 是扇区序号，不是字节数，不能用来算速度
+			UpdateProgressWithInfoWeighted(OP_FORMAT, MSG_217, (uint64_t)i, (uint64_t)SystemAreaSize + BurstSize);
 		CHECK_FOR_USER_CANCEL;
 		if (write_sectors(hLogicalVolume, BytesPerSect, i, BurstSize, pZeroSect) != (BytesPerSect * BurstSize)) {
 			die("Error clearing reserved sectors", ERROR_WRITE_FAULT);

@@ -19,6 +19,10 @@
 - 尚未选择镜像时，开始按钮为灰色。
 - 已选镜像是 Windows 10 或 Windows 11 安装镜像时，开始按钮为亮色。
 - 已选镜像不是上述安装镜像时，开始按钮为灰色，并显示红色文字，说明只接受 Windows 10 或 Windows 11 安装镜像。Windows 7、Windows 8、WinPE、Linux，以及只能整盘 DD 写入的镜像，都属于这种情况。
+- 页面上提供三个按钮，点击后用默认浏览器打开对应地址：
+  - Microsoft activation scripts 提供的 Windows 下载地址：https://massgrave.dev/genuine-installation-media
+  - 微软官方 Windows 11 下载地址：https://www.microsoft.com/zh-cn/software-download/windows11
+  - Microsoft activation scripts 开源仓库地址：https://github.com/massgravel/Microsoft-Activation-Scripts
 
 ## 生成结果
 
@@ -30,10 +34,14 @@
 
 写入 U 盘和生成 ISO 时，都要显示当前正在写入的文件，以及当前写入速度。
 
-速度按大小自动换算成易读单位，例如 B/s、KB/s、MB/s、GB/s，不直接显示原始字节数。
+- 当前文件显示在状态栏左侧，只显示文件名和大小，例如 `install.wim (4.7 GB)`。
+- 速度显示在状态栏右侧、计时器左边，按大小自动换算成易读单位，例如 `B/s`、`KB/s`、`MB/s`、`GB/s`，不直接显示原始字节数。
+- 百分比形式的进度（如 `oscdimg`、`dism` 输出的百分比）没有字节计数含义，不显示速度。
 
 ## 完成提示
 
 生成 ISO 结束后弹出对话框，说明是否成功，以及新 ISO 的保存位置和其他结果信息。
 
 写入 U 盘结束后同样弹出对话框，说明是否成功，以及写入的设备和结果信息。
+
+两种情况都覆盖取消与失败：取消时说明「未生成 ISO」或「未写入介质」，失败时说明失败原因。

@@ -234,6 +234,8 @@ static enum wimlib_progress_status WimProgressFunc(enum wimlib_progress_msg msg_
 			uprint_progress(0, 0);
 		}
 		UpdateProgressWithInfoUpTo(98, progress_op, progress_msg, info->extract.total_bytes + (4 * info->extract.completed_bytes), info->extract.total_bytes * 6);
+		// 上面的进度值是加权后的虚拟值，状态栏速度改用真实字节数
+		UpdateSpeedDisplay(info->extract.completed_bytes);
 		uprint_progress(info->extract.completed_bytes, info->extract.total_bytes);
 		break;
 	case WIMLIB_PROGRESS_MSG_EXTRACT_METADATA:
@@ -268,7 +270,8 @@ static enum wimlib_progress_status WimProgressFunc(enum wimlib_progress_msg msg_
 	case WIMLIB_PROGRESS_MSG_WRITE_STREAMS:
 		uint64_t completed_bytes = last_split_progress.completed_bytes + info->write_streams.completed_compressed_bytes;
 		nb_blocks = last_nb_blocks + completed_bytes / 2048;
-		UpdateProgressWithInfo(OP_FILE_COPY, MSG_231, nb_blocks, total_blocks + extra_blocks);
+		UpdateProgressWithInfo(OP_FILE_COPY, MSG_231, nb_blocks * 2048,
+			(total_blocks + extra_blocks) * 2048);
 		break;
 	default:
 		break;
@@ -524,7 +527,8 @@ static DWORD WINAPI VhdSaveImageThread(void* param)
 			}
 			if (GetVirtualDiskOperationProgress(handle, &overlapped, &vprogress) == ERROR_SUCCESS) {
 				if (vprogress.OperationStatus == ERROR_IO_PENDING)
-					UpdateProgressWithInfo(OP_FORMAT, MSG_261, vprogress.CurrentValue, vprogress.CompletionValue);
+					// 这是 VHD 保存的内部进度，单位不是字节，不能用来算写入速度
+					UpdateProgressWithInfoWeighted(OP_FORMAT, MSG_261, vprogress.CurrentValue, vprogress.CompletionValue);
 			}
 		}
 		if (r != WAIT_OBJECT_0) {

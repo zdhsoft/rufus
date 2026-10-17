@@ -539,7 +539,7 @@ static BOOL FormatNativeVds(DWORD DriveIndex, uint64_t PartitionOffset, DWORD Cl
 							PrintInfo(0, MSG_218, (ulPercentCompleted < 100) ? 1 : 2, 2);
 							UpdateProgress(OP_CREATE_FS, (float)ulPercentCompleted);
 						} else {
-							UpdateProgressWithInfo(OP_FORMAT, MSG_217, ulPercentCompleted, 100);
+							UpdateProgressWithInfoWeighted(OP_FORMAT, MSG_217, ulPercentCompleted, 100);
 						}
 						hr = hr2;
 						if (hr == S_OK)

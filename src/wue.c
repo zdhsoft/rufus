@@ -1172,7 +1172,7 @@ BOOL SetupWinToGo(DWORD DriveIndex, const char* drive_name, BOOL use_esp)
 		ErrorStatus = RUFUS_ERROR(APPERR(ERROR_ISO_EXTRACT));
 	}
 
-	UpdateProgressWithInfo(OP_FILE_COPY, MSG_267, 99, 100);
+	UpdateProgressWithInfoWeighted(OP_FILE_COPY, MSG_267, 99, 100);
 
 	// Setting internal drives offline for Windows To Go is crucial if, for instance, you are using ReFS
 	// on Windows 10 (therefore ReFS v3.4) and don't want a Windows 11 To Go boot to automatically
@@ -1194,7 +1194,7 @@ BOOL SetupWinToGo(DWORD DriveIndex, const char* drive_name, BOOL use_esp)
 	uprintf(cmd);
 	RunCommand(cmd, sysnative_dir, usb_debug);
 
-	UpdateProgressWithInfo(OP_FILE_COPY, MSG_267, 100, 100);
+	UpdateProgressWithInfoWeighted(OP_FILE_COPY, MSG_267, 100, 100);
 
 	if (use_esp) {
 		Sleep(200);
@@ -1555,7 +1555,7 @@ out:
 			md5sum_totalbytes += _filesizeU(boot_wim_path);
 			StrArrayAdd(&modified_files, boot_wim_path, TRUE);
 		}
-		UpdateProgressWithInfo(OP_PATCH, MSG_325, PATCH_PROGRESS_TOTAL, PATCH_PROGRESS_TOTAL);
+		UpdateProgressWithInfoWeighted(OP_PATCH, MSG_325, PATCH_PROGRESS_TOTAL, PATCH_PROGRESS_TOTAL);
 	}
 	return r;
 }

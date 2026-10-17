@@ -240,17 +240,18 @@ out:
 void CreateStatusBar(HFONT* hFont)
 {
 	RECT rect;
-	int edge[2];
+	int edge[3];
 
 	// Create the status bar
 	hStatus = CreateWindowEx(0, STATUSCLASSNAME, NULL, WS_CHILD | WS_VISIBLE | SBARS_TOOLTIPS,
 		CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, hMainDialog,
 		(HMENU)IDC_STATUS, hMainInstance, NULL);
 
-	// Create 2 status areas
+	// Create 3 status areas: message, write speed and timer
 	GetClientRect(hMainDialog, &rect);
-	edge[0] = rect.right - (int)(SB_TIMER_SECTION_SIZE * fScale);
-	edge[1] = rect.right;
+	edge[0] = rect.right - (int)((SB_TIMER_SECTION_SIZE + SB_SPEED_SECTION_SIZE) * fScale);
+	edge[1] = rect.right - (int)(SB_TIMER_SECTION_SIZE * fScale);
+	edge[2] = rect.right;
 	SendMessage(hStatus, SB_SETPARTS, (WPARAM)ARRAYSIZE(edge), (LPARAM)&edge);
 
 	// Set the font

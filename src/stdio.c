@@ -962,7 +962,8 @@ static void print_extracted_file(const char* file_path, uint64_t file_length)
 
 	if (file_path == NULL)
 		return;
-	static_sprintf(str, "%s (%s)", file_path, SizeToHumanReadable(file_length, TRUE, FALSE));
+	// 状态栏宽度有限，只显示文件名和大小，和 ISO 解包保持一致
+	static_sprintf(str, "%s (%s)", _filenameU(file_path), SizeToHumanReadable(file_length, TRUE, FALSE));
 	uprintf("Extracting: %s", str);
 	PrintStatus(0, MSG_000, str);	// MSG_000 is "%s"
 }

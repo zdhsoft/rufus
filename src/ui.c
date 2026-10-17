@@ -1301,6 +1301,8 @@ void UpdateProgress(int op, float percent)
 	}
 }
 
+#define SPEED_SAMPLE_INTERVAL      500		// 状态栏速度的采样间隔（毫秒）
+
 /*
  * The following is taken from GNU wget (progress.c)
  */
@@ -1405,11 +1407,63 @@ static void bar_update(struct bar_progress* bp, uint64_t howmuch, uint64_t dltim
 		hist->pos = 0;
 }
 
+// 状态栏速度采样：只接受真实字节数。用最近若干次采样的滑动平均值，避免数字剧烈跳动。
+static uint64_t speed_start_time = 0, speed_last_time = 0, speed_last_bytes = 0, speed_ema = 0;
+static char speed_display[128];
+
+// 清空速度显示，用于一次操作的开始和结束。
+void ResetStatusSpeed(void)
+{
+	speed_start_time = speed_last_time = speed_last_bytes = speed_ema = 0;
+	speed_display[0] = 0;
+	if (status_speed[0] != 0) {
+		status_speed[0] = 0;
+		SendMessageA(hStatus, SB_SETTEXTA, SBT_OWNERDRAW | SB_SECTION_SPEED, (LPARAM)status_speed);
+		InvalidateRect(hStatus, NULL, TRUE);
+	}
+}
+
+// 只更新状态栏的速度显示。bytes 必须是已处理的真实字节数。
+void UpdateSpeedDisplay(uint64_t bytes)
+{
+	uint64_t now = GetTickCount64(), dt, delta, inst;
+
+	if (speed_start_time == 0) {
+		speed_start_time = speed_last_time = now;
+		speed_last_bytes = bytes;
+		return;
+	}
+	dt = now - speed_last_time;
+	// 采样间隔太短会让速度值剧烈跳动，太长则反应迟钝
+	if (dt < SPEED_SAMPLE_INTERVAL)
+		return;
+	// 不同的进度来源可能给出不同的字节基准（例如 wimlib 的解压字节与写入扇区数），
+	// 一旦回退就直接重设基准，否则会用负增量算出虚高的速度。
+	if (bytes < speed_last_bytes) {
+		speed_last_time = now;
+		speed_last_bytes = bytes;
+		return;
+	}
+	delta = bytes - speed_last_bytes;
+	inst = delta * 1000 / dt;
+	speed_ema = (speed_ema == 0) ? inst : (speed_ema * 3 + inst) / 4;
+	speed_last_time = now;
+	speed_last_bytes = bytes;
+
+	if (speed_ema != 0)
+		static_sprintf(speed_display, "%s/s", SizeToHumanReadable(speed_ema, FALSE, FALSE));
+	if (safe_strcmp(speed_display, status_speed) != 0) {
+		safe_strcpy(status_speed, sizeof(status_speed), speed_display);
+		SendMessageA(hStatus, SB_SETTEXTA, SBT_OWNERDRAW | SB_SECTION_SPEED, (LPARAM)status_speed);
+		InvalidateRect(hStatus, NULL, TRUE);
+	}
+}
+
 // This updates the progress bar as well as the data displayed on it so that we can
 // display percentage completed, rate of transfer and estimated remaining duration.
 // During init (op = OP_INIT) an optional HWND can be passed on which to look for
 // a progress bar. Part of the code (eta, speed) comes from GNU wget.
-void _UpdateProgressWithInfo(int op, int msg, uint64_t processed, uint64_t total, BOOL force)
+void _UpdateProgressWithInfoEx(int op, int msg, uint64_t processed, uint64_t total, BOOL force, BOOL real_bytes)
 {
 	static int last_update_progress_type = UPT_PERCENT;
 	static struct bar_progress bp = { 0 };
@@ -1429,6 +1483,7 @@ void _UpdateProgressWithInfo(int op, int msg, uint64_t processed, uint64_t total
 		speed = 0;
 		memset(&bp, 0, sizeof(bp));
 		bp.total_length = total;
+		ResetStatusSpeed();
 		hProgressBar = NULL;
 		bNoAltMode = (BOOL)msg;
 		if (hProgressDialog != NULL) {
@@ -1463,6 +1518,10 @@ void _UpdateProgressWithInfo(int op, int msg, uint64_t processed, uint64_t total
 			speed = 0;
 		}
 		bar_update(&bp, howmuch, dl_total_time);
+
+		// 状态栏速度只接受真实字节数；百分比与加权进度不参与
+		if (real_bytes)
+			UpdateSpeedDisplay(processed);
 
 		if (bNoAltMode)
 			update_progress_type = UPT_PERCENT;
@@ -1631,7 +1690,17 @@ static int usb_page_ids[] = {
 
 static int iso_page_ids[] = {
 	IDC_ISO_FILE_TXT, IDC_ISO_PATH, IDC_ISO_BROWSE, IDC_ISO_HINT,
+	IDC_ISO_LINK_DOWNLOAD, IDC_ISO_LINK_MICROSOFT, IDC_ISO_LINK_REPO,
 };
+
+// 生成 ISO 页上的三个下载/仓库入口：控件 ID、按钮文字与要打开的地址。
+// 三列写在同一行，改动某一条时不会让显示文字和打开的地址对不上。
+const iso_link_entry iso_links[] = {
+	{ IDC_ISO_LINK_DOWNLOAD,  MSG_379, MAS_WINDOWS_URL },
+	{ IDC_ISO_LINK_MICROSOFT, MSG_380, MS_WINDOWS11_URL },
+	{ IDC_ISO_LINK_REPO,      MSG_381, MAS_REPO_URL },
+};
+const int iso_link_count = ARRAYSIZE(iso_links);
 
 static int usb_page_visible[ARRAYSIZE(usb_page_ids)];
 
@@ -1704,9 +1773,23 @@ void CreateIsoModeUi(HWND hDlg)
 
 	GetWindowRect(GetDlgItem(hDlg, IDC_ISO_PATH), &rc);
 	MapWindowPoints(NULL, hDlg, (POINT*)&rc, 2);
+	// 红色提示可能折成两行（窄窗口或高 DPI），高度保留两行，避免文字被裁掉。
 	hCtrl = CreateWindowExW(0, WC_STATICW, L"", WS_CHILD | SS_OWNERDRAW,
-		mw, rc.bottom + 8, fw, ddh * 2, hDlg, (HMENU)IDC_ISO_HINT, hMainInstance, NULL);
+		mw, rc.bottom + 8, fw, 2 * ddh, hDlg, (HMENU)IDC_ISO_HINT, hMainInstance, NULL);
 	SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
+
+	// 生成 ISO 页上的三个下载/仓库入口，点击后用默认浏览器打开。
+	// 排在红色提示下方，占用 U 盘页被隐藏的那几行空白区域。
+	{
+		int y = rc.bottom + 8 + 2 * ddh + 8;
+		for (i = 0; i < iso_link_count; i++) {
+			hCtrl = CreateWindowExW(0, WC_BUTTONW, L"", WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
+				mw, y, fw, ddh, hDlg, (HMENU)(uintptr_t)iso_links[i].control_id, hMainInstance, NULL);
+			SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
+			SetWindowTextU(hCtrl, lmprintf(iso_links[i].msg_id));
+			y += ddh + 8;
+		}
+	}
 
 	for (i = 0; i < ARRAYSIZE(iso_page_ids); i++)
 		ShowWindow(GetDlgItem(hDlg, iso_page_ids[i]), SW_HIDE);

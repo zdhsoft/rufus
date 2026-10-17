@@ -875,7 +875,8 @@ DWORD RunCommandWithProgress(const char* cmd, const char* dir, BOOL log, int msg
 							matches[3][0] = '\0';
 							float f = 0.0f;
 							IGNORE_RETVAL(sscanf(matches[2], "%f", &f));
-							UpdateProgressWithInfo(OP_FORMAT, msg, (uint64_t)(f * 100.0f), 100 * 100ULL);
+							// oscdimg/dism 之类输出的百分比，不是字节数，不能用来算速度
+							UpdateProgressWithInfoWeighted(OP_FORMAT, msg, (uint64_t)(f * 100.0f), 100 * 100ULL);
 						} else if (log) {
 							// output may contain a '%' so don't feed it as a naked format string
 							uprintf("%s", output);

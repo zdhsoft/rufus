@@ -592,6 +592,9 @@
 #define IDC_ISO_BROWSE                  1202
 #define IDC_ISO_HINT                    1203
 #define IDC_ISO_FILE_TXT                1204
+#define IDC_ISO_LINK_DOWNLOAD           1205
+#define IDC_ISO_LINK_MICROSOFT          1206
+#define IDC_ISO_LINK_REPO               1207
 #define MSG_375                         3375
 #define MSG_376                         3376
 #define MSG_377                         3377

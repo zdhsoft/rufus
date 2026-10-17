@@ -132,6 +132,8 @@ BOOL write_as_image = FALSE, write_as_esp = FALSE, use_vds = FALSE, ignore_boot_
 BOOL appstore_version = FALSE, is_vds_available = TRUE, persistent_log = FALSE, has_ffu_support = FALSE;
 BOOL expert_mode = FALSE, use_rufus_mbr = TRUE, bcdboot_supports_ex = FALSE, append_silent = FALSE;
 BOOL iso_create_mode = FALSE;
+// 状态栏右侧显示的当前写入速度，空字符串表示不显示
+char status_speed[128];
 float fScale = 1.0f;
 int dialog_showing = 0, selection_default = BT_IMAGE, persistence_unit_selection = -1, imop_win_sel = 0;
 int default_fs, fs_type, boot_type, partition_type, target_type;
@@ -904,11 +906,15 @@ void EnableControls(BOOL enable, BOOL remove_checkboxes)
 	if (IS_ISO_OUTPUT()) {
 		BOOL can_edit = !op_in_progress;
 		BOOL supported = (image_path != NULL) && IS_WIN10_OR_11_INSTALL(img_report);
+		int i;
 		SetWindowTextU(GetDlgItem(hMainDialog, IDC_ISO_PATH), (image_path != NULL) ? image_path : "");
 		EnableWindow(GetDlgItem(hMainDialog, IDC_ISO_BROWSE), can_edit);
 		EnableWindow(GetDlgItem(hMainDialog, IDC_ISO_PATH), can_edit);
 		EnableWindow(hStart, can_edit && supported);
 		ShowWindow(GetDlgItem(hMainDialog, IDC_ISO_HINT), (can_edit && (image_path != NULL) && !supported) ? SW_SHOW : SW_HIDE);
+		// 下载入口在操作进行中也不能点，避免中途弹出浏览器
+		for (i = 0; i < iso_link_count; i++)
+			EnableWindow(GetDlgItem(hMainDialog, iso_links[i].control_id), can_edit);
 		return;
 	}
 
@@ -2296,6 +2302,8 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 	static DWORD DeviceNum = 0;
 	static uint64_t LastRefresh = 0;
 	static BOOL first_log_display = TRUE, isMarquee = FALSE, queued_hotplug_event = FALSE;
+	// 只有真正写入 U 盘的操作，完成后才弹出结果对话框（Hash、保存镜像不弹）
+	static BOOL write_done_notify = FALSE;
 	static ULONG ulRegister = 0;
 	static LPITEMIDLIST pidlDesktop = NULL;
 	static SHChangeNotifyEntry NotifyEntry;
@@ -2643,6 +2651,16 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 				}
 			}
 			break;
+		case IDC_ISO_LINK_DOWNLOAD:
+		case IDC_ISO_LINK_MICROSOFT:
+		case IDC_ISO_LINK_REPO:
+			for (i = 0; i < iso_link_count; i++) {
+				if (iso_links[i].control_id == LOWORD(wParam)) {
+					ShellExecuteA(hDlg, "open", iso_links[i].url, NULL, NULL, SW_SHOWNORMAL);
+					break;
+				}
+			}
+			break;
 		case IDC_SELECT:
 			// Ctrl-SELECT is used to select an additional archive of files to extract
 			// For now only zip archives are supported.
@@ -2708,6 +2726,8 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 		case IDC_START:
 			if (format_thread != NULL)
 				return (INT_PTR)TRUE;
+			// 只有开始按钮触发的操作才算写入完成
+			write_done_notify = TRUE;
 			// Just in case
 			boot_type = (int)ComboBox_GetCurItemData(hBootType);
 			partition_type = (int)ComboBox_GetCurItemData(hPartitionScheme);
@@ -2728,6 +2748,8 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 			// we can skip the whole boot check and go straight to creating the modified image.
 			if (IS_ISO_OUTPUT()) {
 				if (!CreateModifiedISO()) {
+					// 用户在保存对话框或定制对话框中选择取消，不算一次操作完成
+					write_done_notify = FALSE;
 					if (!IS_ERROR(ErrorStatus))
 						ErrorStatus = RUFUS_ERROR(APPERR(ERROR_CANT_START_THREAD));
 					PostMessage(hMainDialog, UM_FORMAT_COMPLETED, (WPARAM)FALSE, 0);
@@ -2800,6 +2822,8 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 		break;
 	case UM_ENABLE_CONTROLS:
 		KillTimer(hMainDialog, TID_APP_TIMER);
+		// 操作结束，清空状态栏速度
+		ResetStatusSpeed();
 		if (!IS_ERROR(ErrorStatus))
 			PrintInfo(0, MSG_210);
 		else switch (SCODE_CODE(ErrorStatus)) {
@@ -2820,6 +2844,8 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 		timer = 0;
 		static_sprintf(szTimer, "00:00:00");
 		SendMessageA(hStatus, SB_SETTEXTA, SBT_OWNERDRAW | SB_SECTION_RIGHT, (LPARAM)szTimer);
+		// 新的操作开始，清掉上一次留下速度值
+		ResetStatusSpeed();
 		SetTimer(hMainDialog, TID_APP_TIMER, 1000, ClockTimer);
 		break;
 	case UM_SELECT_ISO:
@@ -2962,6 +2988,11 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 				SetTextColor(pDI->hDC, is_darkmode_enabled ? DARKMODE_NORMAL_TEXT_COLOR : GetSysColor(COLOR_BTNTEXT));
 				DrawTextExU(pDI->hDC, szStatusMessage, -1, &pDI->rcItem,
 					DT_LEFT | DT_END_ELLIPSIS | DT_PATH_ELLIPSIS, NULL);
+				return (INT_PTR)TRUE;
+			case SB_SECTION_SPEED:
+				// 当前写入速度，显示在计时器左侧
+				SetTextColor(pDI->hDC, is_darkmode_enabled ? DARKMODE_NORMAL_TEXT_COLOR : GetSysColor(COLOR_BTNTEXT));
+				DrawTextExA(pDI->hDC, status_speed, -1, &pDI->rcItem, DT_LEFT, NULL);
 				return (INT_PTR)TRUE;
 			case SB_SECTION_RIGHT:
 				SetTextColor(pDI->hDC, is_darkmode_enabled ? DARKMODE_DISABLED_TEXT_COLOR : GetSysColor(COLOR_3DSHADOW));
@@ -3238,6 +3269,10 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 				DeleteFileU(unattend_xml_path);
 				unattend_xml_path = NULL;
 			}
+			// 启动阶段就被取消，没有任何写入发生，不能留下「操作完成」的标记，
+			// 否则后续的 Hash 或保存镜像会误弹结果对话框。
+			write_done_notify = FALSE;
+			created_iso_path[0] = 0;
 			EnableControls(TRUE, FALSE);
 			break;
 		}
@@ -3269,11 +3304,33 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 			PrintInfo(0, MSG_210);
 			MessageBeep(MB_OK);
 			FlashTaskbar(dialog_handle);
+			// 生成 ISO 和写入 U 盘成功后，都弹出结果对话框说明结果。
+			if (!write_done_notify) {
+				created_iso_path[0] = 0;
+			} else if (IS_ISO_OUTPUT()) {
+				Notification(MB_ICONINFORMATION | MB_CLOSE, lmprintf(MSG_382),
+					lmprintf(MSG_383, (created_iso_path[0] != 0) ? created_iso_path : lmprintf(MSG_307)));
+				created_iso_path[0] = 0;
+			} else if (ComboBox_GetCurSel(hDeviceList) >= 0) {
+				char device_name[128];
+				ComboBox_GetTextU(hDeviceList, device_name, sizeof(device_name));
+				Notification(MB_ICONINFORMATION | MB_CLOSE, lmprintf(MSG_384),
+					lmprintf(MSG_385, device_name));
+			}
+			write_done_notify = FALSE;
 		} else if (SCODE_CODE(ErrorStatus) == ERROR_CANCELLED) {
 			SendMessage(hProgress, PBM_SETSTATE, (WPARAM)PBST_PAUSED, 0);
 			SetTaskbarProgressState(TASKBAR_PAUSED);
 			PrintInfo(0, MSG_211);
-			Notification(MB_ICONINFORMATION | MB_CLOSE, lmprintf(MSG_211), lmprintf(MSG_041));
+			// 取消时说明结果：ISO 未生成 / 介质未写入
+			if (write_done_notify && IS_ISO_OUTPUT())
+				Notification(MB_ICONINFORMATION | MB_CLOSE, lmprintf(MSG_386), lmprintf(MSG_387));
+			else if (write_done_notify)
+				Notification(MB_ICONINFORMATION | MB_CLOSE, lmprintf(MSG_388), lmprintf(MSG_389));
+			else
+				Notification(MB_ICONINFORMATION | MB_CLOSE, lmprintf(MSG_211), lmprintf(MSG_041));
+			write_done_notify = FALSE;
+			created_iso_path[0] = 0;
 		} else {
 			SendMessage(hProgress, PBM_SETSTATE, (WPARAM)PBST_ERROR, 0);
 			SetTaskbarProgressState(TASKBAR_ERROR);
@@ -3322,8 +3379,18 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 						CyclePort(index);
 					}
 				}
-				Notification(MB_ICONERROR | MB_CLOSE, lmprintf(MSG_042), lmprintf(MSG_043, StrError(ErrorStatus, FALSE)));
+				if (write_done_notify && IS_ISO_OUTPUT())
+					Notification(MB_ICONERROR | MB_CLOSE, lmprintf(MSG_392),
+						lmprintf(MSG_390, StrError(ErrorStatus, FALSE)));
+				else if (write_done_notify)
+					Notification(MB_ICONERROR | MB_CLOSE, lmprintf(MSG_393),
+						lmprintf(MSG_391, StrError(ErrorStatus, FALSE)));
+				else
+					Notification(MB_ICONERROR | MB_CLOSE, lmprintf(MSG_042),
+						lmprintf(MSG_043, StrError(ErrorStatus, FALSE)));
 			}
+			write_done_notify = FALSE;
+			created_iso_path[0] = 0;
 		}
 		ErrorStatus = 0;
 		LastWriteError = 0;

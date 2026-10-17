@@ -186,7 +186,7 @@ const char* error_message(errcode_t error_code)
 
 errcode_t ext2fs_print_progress(int64_t cur_value, int64_t max_value)
 {
-	UpdateProgressWithInfo(OP_FORMAT, MSG_217, (uint64_t)((ext2_percent_start * max_value) + (ext2_percent_share * cur_value)), max_value);
+	UpdateProgressWithInfoWeighted(OP_FORMAT, MSG_217, (uint64_t)((ext2_percent_start * max_value) + (ext2_percent_share * cur_value)), max_value);
 	uprint_progress((uint64_t)cur_value, (uint64_t)max_value);
 	return IS_ERROR(ErrorStatus) ? EXT2_ET_CANCEL_REQUESTED : 0;
 }
@@ -491,7 +491,7 @@ BOOL FormatExtFs(DWORD DriveIndex, uint64_t PartitionOffset, DWORD BlockSize, LP
 		uprintf("Could not create %s volume: %s", FSName, error_message(r));
 		goto out;
 	}
-	UpdateProgressWithInfo(OP_FORMAT, MSG_217, 100, 100);
+	UpdateProgressWithInfoWeighted(OP_FORMAT, MSG_217, 100, 100);
 	ret = TRUE;
 
 out:

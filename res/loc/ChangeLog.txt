@@ -17,6 +17,23 @@ o v?.??
   - *NEW*      MSG_376 "生成 ISO"
   - *NEW*      MSG_377 "只接受 Windows 10 或 Windows 11 安装镜像"
   - *NEW*      MSG_378 "本地镜像"
+  // 生成 ISO 页上的三个下载/仓库入口按钮，点击后用默认浏览器打开对应地址
+  - *NEW*      MSG_379 "Windows 下载（MAS）"
+  - *NEW*      MSG_380 "微软官方 Windows 11 下载"
+  - *NEW*      MSG_381 "Microsoft Activation Scripts 开源仓库"
+  // 操作结束后的结果对话框：成功时显示新 ISO 路径或写入的介质，取消与失败时说明结果
+  - *NEW*      MSG_382 "生成 ISO 完成"
+  - *NEW*      MSG_383 "已生成新的 ISO 镜像：\n%s"
+  - *NEW*      MSG_384 "写入完成"
+  - *NEW*      MSG_385 "已成功写入介质“%s”。"
+  - *NEW*      MSG_386 "生成 ISO 已取消"
+  - *NEW*      MSG_387 "未生成 ISO 镜像。"
+  - *NEW*      MSG_388 "写入已取消"
+  - *NEW*      MSG_389 "未写入介质。"
+  - *NEW*      MSG_390 "未能生成 ISO 镜像：%s"
+  - *NEW*      MSG_391 "未能写入介质：%s"
+  - *NEW*      MSG_392 "生成 ISO 失败"
+  - *NEW*      MSG_393 "写入失败"
 
 o v4.14 (2026.04.30)
   // NB: I used Google translate to update the following message, so please check for accuracy!

@@ -92,6 +92,8 @@ extern const char *sfd_name, *flash_type[BADLOCKS_PATTERN_TYPES];
 extern char *short_image_path, image_option_txt[128];
 extern int advanced_device_section_height, advanced_format_section_height, persistence_unit_selection;
 extern int selection_default, cbw, ddw, ddbh, bh, update_progress_type;
+// 状态栏右侧显示的当前写入速度，空字符串表示不显示
+extern char status_speed[128];
 
 extern void SetAccessibleName(HWND hCtrl, const char* name);
 extern void SetComboEntry(HWND hDlg, int data);
@@ -118,3 +120,13 @@ extern void SetBootTypeDropdownWidth(void);
 extern void OnPaint(HDC hdc);
 extern void CreateIsoModeUi(HWND hDlg);
 extern void ApplyIsoPageVisibility(BOOL iso);
+
+// 生成 ISO 页上的三个下载/仓库入口。ID、显示文字与打开地址集中在一张表里，
+// 避免创建控件、启用控件和响应点击这三处各写一份而彼此错位。
+typedef struct {
+	int control_id;
+	int msg_id;
+	const char* url;
+} iso_link_entry;
+extern const iso_link_entry iso_links[];
+extern const int iso_link_count;

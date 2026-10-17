@@ -252,17 +252,23 @@ static BOOL is_in_md5sum(char* path)
 
 static void _print_extracted_file(char* psz_fullpath, uint64_t file_length, BOOL split)
 {
+	const char* display_name;
 	size_t nul_pos;
 
 	if (psz_fullpath == NULL)
 		return;
 	// Replace slashes with backslashes and append the size to the path for UI display
 	to_windows_path(psz_fullpath);
+	// 状态栏宽度有限，只显示文件名和大小，例如 'install.wim (4.7 GB)'。
+	// 带路径时，生成 ISO 会把内容解包到 %TEMP% 下的临时目录，长路径会被
+	// DT_PATH_ELLIPSIS 压缩，反而把文件名和大小挤掉。日志仍记录完整路径。
+	// 在追加大小之前取文件名，追加后即是指向 '文件名 (大小)' 的指针。
+	display_name = _filenameU(psz_fullpath);
 	nul_pos = strlen(psz_fullpath);
 	safe_sprintf(&psz_fullpath[nul_pos], 24, " (%s)", SizeToHumanReadable(file_length, TRUE, FALSE));
 	uprintf(split ? "Splitting: %s" : "Extracting: %s", psz_fullpath);
 	safe_sprintf(&psz_fullpath[nul_pos], 24, " (%s)", SizeToHumanReadable(file_length, FALSE, FALSE));
-	PrintStatus(0, MSG_000, psz_fullpath);	// MSG_000 is "%s"
+	PrintStatus(0, MSG_000, display_name);	// MSG_000 is "%s"
 	// Remove the appended size for extraction
 	psz_fullpath[nul_pos] = 0;
 	// ISO9660 cannot handle backslashes
@@ -794,7 +800,8 @@ static int udf_extract_files(udf_t *p_udf, udf_dirent_t *p_udf_dirent, const cha
 					file_length -= wr_size;
 					nb_blocks += nb;
 					if (nb_blocks - last_nb_blocks >= PROGRESS_THRESHOLD) {
-						UpdateProgressWithInfo(OP_FILE_COPY, MSG_231, nb_blocks, total_blocks);
+						UpdateProgressWithInfo(OP_FILE_COPY, MSG_231, nb_blocks * ISO_BLOCKSIZE,
+							total_blocks * ISO_BLOCKSIZE);
 						last_nb_blocks = nb_blocks;
 					}
 				}
@@ -1078,8 +1085,8 @@ static int iso_extract_files(iso9660_t* p_iso, const char *psz_path)
 						file_length -= wr_size;
 						nb_blocks += nb;
 						if (nb_blocks - last_nb_blocks >= PROGRESS_THRESHOLD) {
-							UpdateProgressWithInfo(OP_FILE_COPY, MSG_231, nb_blocks, total_blocks +
-								((fs_type != FS_NTFS) ? extra_blocks : 0));
+							UpdateProgressWithInfo(OP_FILE_COPY, MSG_231, nb_blocks * ISO_BLOCKSIZE,
+								(total_blocks + ((fs_type != FS_NTFS) ? extra_blocks : 0)) * ISO_BLOCKSIZE);
 							last_nb_blocks = nb_blocks;
 						}
 					}
@@ -2744,6 +2751,9 @@ typedef struct {
 	char* Label;				// Volume label of the new image
 } ISO_CREATE;
 
+// 生成成功时的新 ISO 路径，供操作结束后的提示对话框使用。
+char created_iso_path[MAX_PATH];
+
 static void RemoveIsoExtractDir(const char* dir)
 {
 	if ((dir != NULL) && (dir[0] != 0))
@@ -2865,6 +2875,9 @@ static DWORD WINAPI IsoCreateThread(void* param)
 	static_sprintf(cmd, "\"%s\" -h -m -o -u1 -udfver102 -l\"%s\" -bootdata:%s \"%s\" \"%s\"",
 		oscdimg, iso_create->Label, bootdata, extract_dir, out_path);
 	uprintf("Running command: '%s'", cmd);
+	// 打包阶段没有逐个文件的粒度，状态栏左侧改为显示正在生成的 ISO，
+	// 否则会一直停在上一个解包出来的文件名上。与其他进度一样只显示文件名。
+	PrintStatus(0, MSG_000, _filenameU(out_path));	// MSG_000 is "%s"
 	r = RunCommandWithProgress(cmd, sysnative_dir, FALSE, MSG_261, ".*\r([0-9\\.]+)% complete.*");
 	if (r != 0) {
 		uprintf("Failed to create ISO image: %s", WindowsErrorString());
@@ -2892,9 +2905,14 @@ out:
 	iso_mode_output = FALSE;
 	RemoveIsoExtractDir(extract_dir);
 	safe_free(extract_dir);
-	PostMessage(hMainDialog, UM_FORMAT_COMPLETED, (WPARAM)TRUE, 0);
-	if (!IS_ERROR(ErrorStatus))
+	// 在通知主线程之前写好输出路径，避免对话框先于赋值弹出
+	if (!IS_ERROR(ErrorStatus)) {
 		uprintf("Created bootable image '%s'", out_path);
+		safe_strcpy(created_iso_path, sizeof(created_iso_path), out_path);
+	} else {
+		created_iso_path[0] = 0;
+	}
+	PostMessage(hMainDialog, UM_FORMAT_COMPLETED, (WPARAM)TRUE, 0);
 	safe_free(iso_create->ImagePath);
 	safe_free(iso_create->Label);
 	ExitThread(r);
