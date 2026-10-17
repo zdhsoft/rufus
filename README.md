@@ -22,6 +22,7 @@ Features
 * Create bootable drives from bootable ISOs (Windows, Linux, etc.)
 * Create bootable drives from bootable disk images, including compressed ones
 * Create Windows 11 installation drives for PCs that don't have TPM or Secure Boot
+* Create Windows 10/11 installation ISOs (see [New features in this fork](#new-features-in-this-fork))
 * Create [Windows To Go](https://en.wikipedia.org/wiki/Windows_To_Go) drives
 * Create VHD/DD, VHDX and FFU images of an existing drive
 * Create persistent Linux partitions
@@ -35,6 +36,17 @@ Features
 * Small footprint. No installation required.
 * Portable. Secure Boot compatible.
 * 100% [Free Software](https://www.gnu.org/philosophy/free-sw) ([GPL v3](https://www.gnu.org/licenses/gpl-3.0))
+
+New features in this fork
+-------------------------
+
+* Create Windows 10/11 installation ISOs
+* Buttons that open the Windows download and Microsoft Activation Scripts websites
+
+本分支新增特性：
+
+* 增加 Windows 10/11 生成 ISO 的功能
+* 增加相关网站打开按钮
 
 Compilation
 -----------
